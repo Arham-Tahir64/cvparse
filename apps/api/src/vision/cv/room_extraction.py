@@ -5,6 +5,7 @@ faces. Fallback: flood-fill segmentation of the rasterized wall mask.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 
@@ -123,6 +124,15 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     cv2.rectangle(crop, (0, 0), (w - 1, h - 1), 255, border)
 
     free = (crop == 0).astype(np.uint8)
+    # The proposal pass establishes an OCR-seeded architectural envelope.
+    # After measurement removal, window/door gaps can otherwise connect an
+    # interior seed to whitespace around the plan and make a room component
+    # wrap the entire drawing. Restrict the final segmentation to that
+    # independently inferred envelope; the initial proposal call has no such
+    # mask yet and therefore remains unchanged.
+    semantic_plan = getattr(state, "semantic_plan_mask", None)
+    if semantic_plan is not None:
+        free[semantic_plan[y:y + h, x:x + w] == 0] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(free, 4)
     if count <= 1:
         return []
@@ -145,8 +155,12 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
             by_component[component_id] = (label, confidence)
 
     rooms: list[Room] = []
+    selected_free = np.zeros(state.image.shape[:2], np.uint8)
     for component_id, (label, confidence) in by_component.items():
         component = (labels == component_id).astype(np.uint8) * 255
+        selected_free[y:y + h, x:x + w] = cv2.bitwise_or(
+            selected_free[y:y + h, x:x + w], component,
+        )
         contours, _ = cv2.findContours(
             component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -166,6 +180,55 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
             area=float(stats[component_id, cv2.CC_STAT_AREA]),
             label=label, label_confidence=confidence,
         ))
+
+    # Preserve the conservative polygons for window exterior-context checks.
+    # Export completion below must not make both sides of an exterior window
+    # appear to be inside a room.
+    state.window_context_rooms = [
+        dataclasses.replace(room, polygon=list(room.polygon)) for room in rooms
+    ]
+
+    room_export = selected_free
+    if rooms and semantic_plan is not None:
+        completed_plan = _rectangularized_room_clip(state, semantic_plan)
+        completion = cv2.bitwise_and(
+            completed_plan, cv2.bitwise_not(semantic_plan),
+        )
+        if np.any(completion):
+            room_export = cv2.bitwise_or(selected_free, completion)
+            # The largest open/circulation room owns the missing plan corner.
+            # Extend only that object for vector export; the exact raster below
+            # remains unchanged for structural boundary support.
+            largest = max(rooms, key=lambda room: room.area)
+            polygon_mask = np.zeros(state.image.shape[:2], np.uint8)
+            cv2.fillPoly(
+                polygon_mask,
+                [np.asarray([[_pixel_point(point) for point in largest.polygon]],
+                            np.int32)],
+                255,
+            )
+            polygon_mask = cv2.bitwise_or(polygon_mask, completion)
+            contours, _ = cv2.findContours(
+                polygon_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            )
+            if contours:
+                contour = max(contours, key=cv2.contourArea)
+                epsilon = (
+                    config.semantic_room_poly_epsilon_frac
+                    * cv2.arcLength(contour, True)
+                )
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                largest.polygon = [
+                    Point(float(point[0][0]), float(point[0][1]))
+                    for point in approx
+                ]
+
+    # Simplified polygons cannot represent holes. Retain the exact component
+    # raster so semantic wall support and the final class mask preserve every
+    # internal wall separating a room from a surrounding open/circulation
+    # region. This raster is computed after drafting removal when available.
+    state.room_free_space_mask = selected_free if rooms else None
+    state.room_export_mask = room_export if rooms else None
 
     logger.info("semantic raster extraction found %d rooms from %d seeds",
                 len(rooms), len(seeds))
@@ -198,6 +261,32 @@ def build_semantic_plan_mask(state) -> np.ndarray | None:
             mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
         )
     return mask
+
+
+def _rectangularized_room_clip(
+    state: PipelineState, semantic_plan: np.ndarray,
+) -> np.ndarray:
+    """Complete near-rectangular room bounds without changing line filtering."""
+    if not state.config.manhattan:
+        return semantic_plan
+    x, y, width, height = cv2.boundingRect(semantic_plan)
+    if width < 1 or height < 1:
+        return semantic_plan
+    fill = cv2.countNonZero(
+        semantic_plan[y:y + height, x:x + width]
+    ) / float(width * height)
+    if fill < state.config.semantic_plan_rectangularize_min_fill:
+        return semantic_plan
+    completed = semantic_plan.copy()
+    cv2.rectangle(
+        completed, (x, y), (x + width - 1, y + height - 1),
+        255, cv2.FILLED,
+    )
+    return completed
+
+
+def _pixel_point(point: Point) -> tuple[int, int]:
+    return int(round(point.x)), int(round(point.y))
 
 
 def _room_label_seeds(state) -> list[tuple[str, float, int, int]]:

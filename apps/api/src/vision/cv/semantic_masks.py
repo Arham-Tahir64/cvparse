@@ -40,16 +40,29 @@ def run(state: PipelineState) -> PipelineState:
     window_mask = np.zeros(shape, np.uint8)
     room_mask = np.zeros(shape, np.uint8)
 
-    for room in state.rooms:
-        if len(room.polygon) < 3:
-            continue
-        polygon = np.asarray([[_pixel(point) for point in room.polygon]], np.int32)
-        cv2.fillPoly(room_mask, polygon, 255)
+    exact_room_mask = getattr(state, "room_free_space_mask", None)
+    export_room_mask = getattr(state, "room_export_mask", None)
+    if export_room_mask is not None and export_room_mask.shape == shape:
+        room_mask = export_room_mask.copy()
+    elif exact_room_mask is not None and exact_room_mask.shape == shape:
+        room_mask = exact_room_mask.copy()
+    else:
+        for room in state.rooms:
+            if len(room.polygon) < 3:
+                continue
+            polygon = np.asarray([[_pixel(point) for point in room.polygon]], np.int32)
+            cv2.fillPoly(room_mask, polygon, 255)
 
     interior_width_limit = _interior_wall_thickness_limit(state)
-    room_support = _room_boundary_support(state, room_mask)
+    support_mask = (
+        exact_room_mask
+        if exact_room_mask is not None and exact_room_mask.shape == shape
+        else room_mask
+    )
+    room_support = _room_boundary_support(state, support_mask)
+    exterior_ring = _exterior_wall_ring(state, support_mask)
     accepted_walls = 0
-    rejected_walls = 0
+    deferred_walls: list[Wall] = []
     line_lookup = {line.id: line for line in state.classified_lines}
     for wall in state.walls:
         if state.config.manhattan and wall.orientation == "diagonal":
@@ -58,14 +71,14 @@ def run(state: PipelineState) -> PipelineState:
         _draw_wall_band(
             candidate, wall, 255, thickness_limit=interior_width_limit,
         )
-        if _candidate_has_room_support(candidate, room_support, state):
+        if (
+            _candidate_has_room_support(candidate, room_support, state)
+            and not _candidate_overlaps_measurement(candidate, state)
+        ):
             wall_polygons = cv2.bitwise_or(wall_polygons, candidate)
             accepted_walls += 1
         else:
-            rejected_wall_candidates = cv2.bitwise_or(
-                rejected_wall_candidates, candidate,
-            )
-            rejected_walls += 1
+            deferred_walls.append(wall)
         sources = [line_lookup[source_id] for source_id in wall.source_ids
                    if source_id in line_lookup]
         if sources:
@@ -86,6 +99,21 @@ def run(state: PipelineState) -> PipelineState:
                                  np.ones((3, 3), np.uint8)),
             )
 
+    recovered_walls, rejected_walls = _recover_structurally_connected_walls(
+        state, deferred_walls, wall_polygons, exterior_ring,
+        interior_width_limit,
+    )
+    for wall in recovered_walls:
+        _draw_wall_band(
+            wall_polygons, wall, 255, thickness_limit=interior_width_limit,
+        )
+    for wall in rejected_walls:
+        _draw_wall_band(
+            rejected_wall_candidates, wall, 255,
+            thickness_limit=interior_width_limit,
+        )
+    accepted_walls += len(recovered_walls)
+
     # Structural-protection corridors belong to the permissive cleanup pass:
     # they preserve possible wall ink while drafting is removed, but are not
     # independently validated wall regions. Semantic export therefore starts
@@ -95,7 +123,6 @@ def run(state: PipelineState) -> PipelineState:
     if state.semantic_plan_mask is not None:
         reconstructed = cv2.bitwise_and(reconstructed, state.semantic_plan_mask)
 
-    exterior_ring = _exterior_wall_ring(state, room_mask)
     if exterior_ring is not None:
         reconstructed = cv2.bitwise_or(reconstructed, exterior_ring)
 
@@ -172,7 +199,8 @@ def run(state: PipelineState) -> PipelineState:
         round(interior_width_limit)
     )
     state.debug.segment_counts["13_supported_walls"] = accepted_walls
-    state.debug.segment_counts["13_rejected_wall_candidates"] = rejected_walls
+    state.debug.segment_counts["13_topology_restored_walls"] = len(recovered_walls)
+    state.debug.segment_counts["13_rejected_wall_candidates"] = len(rejected_walls)
     state.debug.segment_counts["13_window_pixels"] = int(np.count_nonzero(window_mask))
 
     if state.config.debug_visualize and state.config.debug_output_dir:
@@ -283,6 +311,111 @@ def _candidate_has_room_support(
         cv2.bitwise_and(candidate, room_support)
     ))
     return supported / area >= state.config.wall_region_room_support_min_overlap
+
+
+def _candidate_overlaps_measurement(
+    candidate: np.ndarray, state: PipelineState,
+) -> bool:
+    """Veto wall bands running alongside a text-confirmed dimension rule."""
+    measurement = getattr(state, "measurement_context_mask", None)
+    if measurement is None:
+        measurement = getattr(state, "confirmed_measurement_mask", None)
+    if measurement is None or not np.any(measurement):
+        return False
+    area = int(np.count_nonzero(candidate))
+    if area < 1:
+        return False
+    overlap = int(np.count_nonzero(cv2.bitwise_and(candidate, measurement)))
+    return overlap / area >= state.config.wall_region_measurement_veto_min_overlap
+
+
+def _recover_structurally_connected_walls(
+    state: PipelineState,
+    deferred_walls: list[Wall],
+    accepted_mask: np.ndarray,
+    exterior_ring: np.ndarray | None,
+    interior_width_limit: float,
+) -> tuple[list[Wall], list[Wall]]:
+    """Recover room-mask false negatives using independent wall topology.
+
+    A floating dimension rule has neither measured face-to-face thickness nor
+    attachment to the structural graph. A true partition can temporarily lack
+    room-boundary support when a room was truncated, but its paired faces and
+    endpoints still connect to already-supported walls. Recovery is iterative
+    so a validated segment can anchor the next segment in the same wall chain.
+    """
+    if not deferred_walls:
+        return [], []
+    config = state.config
+    anchor = accepted_mask.copy()
+    if exterior_ring is not None:
+        anchor = cv2.bitwise_or(anchor, exterior_ring)
+    if not np.any(anchor):
+        return [], list(deferred_walls)
+
+    degree_by_wall: dict[str, int] = {}
+    for junction in state.junctions:
+        degree = len(set(junction.walls))
+        for wall_id in junction.walls:
+            degree_by_wall[wall_id] = max(degree_by_wall.get(wall_id, 0), degree)
+
+    radius = max(1, int(config.wall_region_structural_restore_endpoint_radius_px))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1),
+    )
+    max_width = (
+        interior_width_limit
+        * float(config.wall_region_structural_restore_width_scale)
+    )
+    minimum_degree = int(
+        config.wall_region_structural_restore_min_junction_degree
+    )
+    recovered: list[Wall] = []
+    remaining = list(deferred_walls)
+
+    while remaining:
+        nearby = cv2.dilate(anchor, kernel)
+        next_remaining: list[Wall] = []
+        changed = False
+        for wall in remaining:
+            wall_width = max(wall.thickness, wall.visual_thickness)
+            identifiers = [wall.id, *wall.source_ids]
+            junction_degree = max(
+                (degree_by_wall.get(identifier, 0) for identifier in identifiers),
+                default=0,
+            )
+            endpoint_hits = sum(
+                _mask_contains_point(nearby, endpoint)
+                for endpoint in (wall.centerline.start, wall.centerline.end)
+            )
+            structurally_plausible = (
+                wall.merge_kind == "paired_faces"
+                and wall.merge_confidence
+                >= config.wall_region_structural_restore_min_confidence
+                and wall_width <= max_width
+            )
+            connected = (
+                endpoint_hits >= 2
+                or (endpoint_hits >= 1 and junction_degree >= minimum_degree)
+            )
+            if structurally_plausible and connected:
+                _draw_wall_band(
+                    anchor, wall, 255, thickness_limit=interior_width_limit,
+                )
+                recovered.append(wall)
+                changed = True
+            else:
+                next_remaining.append(wall)
+        remaining = next_remaining
+        if not changed:
+            break
+
+    return recovered, remaining
+
+
+def _mask_contains_point(mask: np.ndarray, point: Point) -> bool:
+    x, y = _pixel(point)
+    return bool(0 <= y < mask.shape[0] and 0 <= x < mask.shape[1] and mask[y, x])
 
 
 def _exterior_wall_ring(

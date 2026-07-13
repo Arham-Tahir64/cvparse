@@ -594,3 +594,137 @@ does not use global dilation or any coordinate from the reference annotation.
   swings, and short fragmented interior wall ends rather than broad wall
   over-expansion. Fixing those reliably requires either broader free-space
   seeding/training data or a different learned door/room segmentation model.
+
+## Highlighted room-barrier and missing-wall iteration (in progress)
+
+### Cycle 1 baseline and proposed redesign
+
+- The two screenshots were registered to the 1536x1024 evaluation frame at
+  correlation 0.929 and 0.831. Their evaluation crops are rec-room
+  `(418,625)-(905,827)` and bath/linen/mechanical strip
+  `(741,331)-(841,680)`; native 200-DPI crops are exported under
+  `debug_output/focus_baseline/` with the seven requested views.
+- Rec-room baseline: room IoU 0.6121, recall 0.6167. The cleaned structural
+  binary still contains 637 pixels on the long vertical dimension rule and
+  2,471 on the horizontal dimension run. The seeded room terminates exactly
+  on the vertical rule, while the goal continues across it.
+- Missing-wall baseline: wall IoU 0.2632 and recall 0.3008. The clean-pass
+  boundary mask contains the paired faces, but the final room-boundary filter
+  rejects the collinear structural chain around linen and mechanical rooms.
+- Root cause 1: dimension recognition uses distance to the *midpoint* of a
+  line. A 634 px vertical rule only 7 px from its rotated `17' 3/"` OCR box is
+  68 px from the line midpoint and remains `unknown`; directional room
+  morphology then promotes it to a barrier. Drafting pixels inside provisional
+  protection can also be restored before room segmentation.
+- Root cause 2: semantic wall admission relies on room-boundary overlap alone.
+  Real paired segments such as the 204 px bathroom wall and adjoining
+  154--279 px wall chain have strong paired faces and junctions but little
+  overlap because the incomplete room segmentation is itself used as the
+  support signal.
+
+Proposed coupled change:
+
+1. Recognize dimension rules by their minimum geometric distance to a nearby
+   dimension OCR box plus matching horizontal/vertical text orientation,
+   rather than midpoint distance. Do not restore pixels explicitly classified
+   as drafting; use the existing bounded directional repair to close any small
+   holes where a removed rule crosses a protected real wall.
+2. Recompute seeded rooms from that repaired clean binary, verifying that a
+   dimension line cannot create a second free-space component or truncate the
+   labeled room.
+3. Keep room-boundary support as the primary semantic wall signal, then run a
+   bounded topology-recovery pass for rejected paired walls whose width fits
+   the plan-specific structural mode and whose endpoints connect to accepted
+   walls/exterior shell or a multi-wall junction. This restores enclosure
+   chains without globally relaxing the drafting filter.
+4. Gate retention on simultaneous improvement in both registered crops and
+   whole-image metrics; reject any cleanup widening that trades room recovery
+   for missing structural walls.
+
+### Cycle 1 retained: exact room support and topology recovery
+
+- Long dimension baselines are now associated with the nearest edge of a
+  parallel OCR measurement box instead of the line midpoint. A separate
+  confirmed-measurement context mask prevents adjacent/continued dimension
+  strokes from being exported as semantic walls without deleting nearby
+  structural pixels.
+- Drafting removal suppresses only text-confirmed measurement pixels inside
+  permissive wall protection. Its directional repair closes the small holes
+  where a measurement crosses paired real wall faces. A test verifies that
+  open-room portions remain removed while both wall faces survive.
+- Room extraction now retains the exact selected connected-component raster.
+  Simplified outer contours previously filled structural holes whenever a
+  recreation/circulation component wrapped around enclosed rooms; the exact
+  raster is used for wall-boundary support and final room masks.
+- Rejected paired wall candidates can now be recovered through a bounded,
+  iterative topology pass when their width matches the plan-specific wall
+  mode, confidence is at least 0.80, and both endpoints (or one endpoint plus
+  a multi-wall junction) attach to accepted structure. Floating single lines
+  remain rejected.
+- Rejected experiment: suppressing every drafting pixel inside wall
+  protection caused all interior rooms to merge and all 104 wall candidates
+  to fail room support. Rejected experiment: widening a global measurement
+  corridor raised the missing-wall crop but reduced recreation-crop wall IoU
+  to 0.674. Neither change was retained.
+- Tests: 159 passed. Full uncached run: 376.1 s, 116 walls, 4 doors, 7 windows,
+  8/8 rooms. Output `debug_output/highlight_cycle1_full.{pdf,png}`;
+  intermediates `debug_output/highlight_cycle1_full_intermediates/`; focused
+  crops `debug_output/focus_cycle1_full/`.
+
+| Focus metric | Baseline | Cycle 1 | Change |
+|---|---:|---:|---:|
+| Rec-room vertical barrier pixels | 637 | 0 | -637 |
+| Rec-room horizontal barrier pixels | 2,471 | 2 | -2,469 |
+| Rec-room room IoU | 0.6176 | 0.8718 | +0.2542 |
+| Rec-room wall IoU | 0.7174 | 0.7169 | -0.0005 |
+| Missing-wall crop wall IoU | 0.2668 | 0.4528 | +0.1860 |
+| Missing-wall crop wall boundary F1 | 0.2859 | 0.7394 | +0.4535 |
+| Missing-wall crop room IoU | 0.3657 | 0.6618 | +0.2961 |
+
+| Full rendered metric | Previous full | Cycle 1 | Change |
+|---|---:|---:|---:|
+| Wall IoU | 0.6243 | 0.6359 | +0.0116 |
+| Door IoU | 0.1373 | 0.1386 | +0.0013 |
+| Window IoU | 0.2048 | 0.1985 | -0.0063 |
+| Room IoU | 0.5548 | 0.7425 | +0.1877 |
+| Macro IoU | 0.3803 | 0.4289 | +0.0486 |
+| Foreground IoU | 0.6536 | 0.8280 | +0.1744 |
+
+### Cycle 2 retained: complete a near-rectangular room corner
+
+- Whole-output inspection found one remaining diagonal truncation across the
+  recreation room. The OCR-derived semantic plan hull is 93.0% rectangular,
+  but its diagonal lower-right edge clips valid free space.
+- Rejected experiment: rectangularizing the upstream plan mask recovered the
+  corner but changed line classification, reducing window IoU from 0.2510 to
+  0.1332 and recreation-crop wall IoU from 0.7169 to 0.6636.
+- Current design keeps the conservative plan hull for drafting, walls, and
+  window exterior-context inference. Only the room export receives the
+  missing pixels of a >=90%-filled Manhattan rectangle; exact pre-completion
+  free-space remains the structural wall-support signal, and original room
+  polygons remain the window-context signal.
+- Cached and full results retain identical structural detections to Cycle 1:
+  116 walls, 4 doors, 7 windows, 8 rooms, and 11 gaps. Recreation-crop room
+  IoU improves 0.8718 -> 0.9158; rendered full room IoU improves
+  0.7425 -> 0.7744; foreground IoU improves 0.8280 -> 0.8514; macro IoU
+  improves 0.4289 -> 0.4356. Wall IoU remains 0.6359. Door IoU changes
+  0.1386 -> 0.1344 and window IoU 0.1985 -> 0.1979 because the larger room
+  overlay changes rendered colour ownership; direct door/window masks are
+  unchanged.
+- Tests: 160 passed. Full uncached run: 366.0 s. Final output for this cycle:
+  `debug_output/highlight_cycle2_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle2_full.json`; intermediates:
+  `debug_output/highlight_cycle2_full_intermediates/`; focused crops:
+  `debug_output/focus_cycle2_full/`.
+
+### Cycle 3 goal: door geometry and coverage
+
+- Whole-output inspection after Cycle 2 identifies doors as the largest
+  remaining labeled-class error: rendered IoU 0.1344, recall 0.2894, and only
+  4 detected doors against substantially more ground-truth swing regions.
+- Next hypothesis: the current circle/quarter-arc proposal path is too strict
+  for fragmented PDF swing arcs and assigns sectors from incomplete arc
+  samples without enough jamb/wall-opening evidence. The next cycle will
+  measure each detected door against the truth, audit rejected arc candidates,
+  and test whether wall-gap seeded arc assembly can improve recall without
+  promoting fixtures or room symbols.

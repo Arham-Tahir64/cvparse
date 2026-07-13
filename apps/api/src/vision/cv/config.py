@@ -61,7 +61,8 @@ class PipelineConfig:
     leader_max_length_px: float = 60.0         # rule 2 length ceiling
     dimension_min_length_px: float = 30.0      # rule 3 length floor
     dimension_tick_search_px: float = 8.0      # tick-mark search radius at endpoints
-    dimension_text_dist_px: float = 20.0       # max dist from midpoint to dimension text
+    dimension_text_dist_px: float = 20.0       # max edge distance to dimension text bbox
+    dimension_text_angle_tol_deg: float = 20.0 # baseline must follow text major axis
     hatch_cluster_density_threshold: int = 8
     hatch_short_line_max_px: float = 30.0
     hatch_neighbor_radius_px: float = 40.0     # midpoint radius for hatch clustering
@@ -121,6 +122,18 @@ class PipelineConfig:
     wall_region_room_support_min_rooms: int = 2
     wall_region_room_support_radius_px: int = 20
     wall_region_room_support_min_overlap: float = 0.20
+    wall_region_measurement_veto_radius_px: int = 6
+    wall_region_measurement_veto_min_overlap: float = 0.10
+    wall_region_measurement_veto_extension_px: int = 80
+    # Room extraction is deliberately conservative, so a legitimate paired
+    # wall can be absent from its boundary support when a neighbouring room is
+    # incomplete. Recover only narrow, high-confidence candidates that attach
+    # to already-supported structural walls at both ends, or at one end plus
+    # an independently detected junction.
+    wall_region_structural_restore_width_scale: float = 1.0
+    wall_region_structural_restore_endpoint_radius_px: int = 40
+    wall_region_structural_restore_min_junction_degree: int = 2
+    wall_region_structural_restore_min_confidence: float = 0.80
     exterior_wall_min_side_support: float = 0.45
     exterior_wall_min_rectangularity: float = 0.85
 
@@ -187,6 +200,11 @@ class PipelineConfig:
     semantic_room_poly_epsilon_frac: float = 0.002
     semantic_room_seed_confidence: float = 0.6
     semantic_plan_margin_px: int = 90
+    # OCR-seeded convex hulls can cut a diagonal corner from an otherwise
+    # rectangular Manhattan plan when one open room reaches the exterior.
+    # Fill the hull bbox only when its occupancy independently demonstrates a
+    # near-rectangle; L/U-shaped plans remain untouched.
+    semantic_plan_rectangularize_min_fill: float = 0.90
 
     # --- Module 10: OCR ---
     ocr_engine: Literal["paddle", "tesseract"] = "paddle"

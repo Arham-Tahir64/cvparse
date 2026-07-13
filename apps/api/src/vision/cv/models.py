@@ -239,6 +239,8 @@ class PipelineState:
     semantic_plan_mask: Optional[np.ndarray] = None
     # Dedicated pre-segmentation drafting removal products.
     drafting_mask: Optional[np.ndarray] = None
+    confirmed_measurement_mask: Optional[np.ndarray] = None
+    measurement_context_mask: Optional[np.ndarray] = None
     # Drafting pixels specifically inside the inferred plan envelope. Keeping
     # these separate from schedules/notes outside the plan makes residual
     # measurement-line errors directly inspectable.
@@ -254,6 +256,11 @@ class PipelineState:
     wall_mask: Optional[np.ndarray] = None
     door_mask: Optional[np.ndarray] = None
     window_mask: Optional[np.ndarray] = None
+    # Exact selected free-space components from semantic room extraction.
+    # Unlike the simplified Room polygons, this raster preserves wall-shaped
+    # holes inside concave/circulation regions.
+    room_free_space_mask: Optional[np.ndarray] = None
+    room_export_mask: Optional[np.ndarray] = None
     room_region_mask: Optional[np.ndarray] = None
     combined_class_mask: Optional[np.ndarray] = None
     dpi: int = 200
@@ -267,6 +274,8 @@ class PipelineState:
     doors: list[Door] = field(default_factory=list)
     windows: list[Window] = field(default_factory=list)
     rooms: list[Room] = field(default_factory=list)
+    # Pre-completion room geometry used only for exterior window context.
+    window_context_rooms: list[Room] = field(default_factory=list)
     debug: DebugInfo = field(default_factory=DebugInfo)
 
     def to_takeoff_result(self) -> CVTakeoffResult:

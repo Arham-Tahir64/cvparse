@@ -219,7 +219,8 @@ def _face_gap_windows(wall, binary, config, window_id_gen, gap_id_gen, state):
 
 
 def _has_exterior_context(wall, center, state, config) -> bool:
-    if not config.window_require_exterior_context or not state.rooms:
+    context_rooms = getattr(state, "window_context_rooms", None) or state.rooms
+    if not config.window_require_exterior_context or not context_rooms:
         return True
     cl = wall.centerline
     length = max(1e-6, cl.length)
@@ -233,7 +234,7 @@ def _has_exterior_context(wall, center, state, config) -> bool:
     ]
 
     def in_any_room(point):
-        for room in state.rooms:
+        for room in context_rooms:
             if len(room.polygon) < 3:
                 continue
             contour = np.asarray(
@@ -248,7 +249,7 @@ def _has_exterior_context(wall, center, state, config) -> bool:
         return False
 
     hull_points = np.asarray(
-        [[point.x, point.y] for room in state.rooms for point in room.polygon],
+        [[point.x, point.y] for room in context_rooms for point in room.polygon],
         dtype=np.float32,
     )
     if len(hull_points) < 3:

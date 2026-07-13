@@ -4,7 +4,9 @@ import numpy as np
 
 from vision.cv import semantic_masks
 from vision.cv.config import PipelineConfig
-from vision.cv.models import Door, LineSegment, PipelineState, Point, Room, Wall, Window
+from vision.cv.models import (
+    Door, Junction, LineSegment, PipelineState, Point, Room, Wall, Window,
+)
 
 
 def wall(wid, x1, y1, x2, y2, thickness=16):
@@ -56,6 +58,32 @@ def test_room_and_door_masks_are_exported_separately():
     assert state.room_region_mask[200, 200] == 255
     assert state.door_mask[120, 120] == 255
     assert tuple(state.combined_class_mask[120, 120]) == semantic_masks.CLASS_COLORS["door"]
+
+
+def test_exact_room_raster_preserves_internal_wall_holes():
+    state = PipelineState(config=PipelineConfig(
+        wall_region_room_support_min_rooms=2,
+        wall_region_room_support_radius_px=4,
+    ))
+    state.image = np.full((260, 420), 255, np.uint8)
+    state.rooms = [
+        Room("OUTER", [Point(20, 20), Point(400, 20), Point(400, 240), Point(20, 240)],
+             area=83600),
+        Room("INNER", [Point(160, 80), Point(260, 80), Point(260, 180), Point(160, 180)],
+             area=10000),
+    ]
+    state.room_free_space_mask = np.zeros(state.image.shape, np.uint8)
+    cv2.rectangle(state.room_free_space_mask, (20, 20), (400, 240), 255, cv2.FILLED)
+    # An exact structural hole remains between surrounding and enclosed space.
+    cv2.rectangle(state.room_free_space_mask, (150, 70), (270, 190), 0, cv2.FILLED)
+    cv2.rectangle(state.room_free_space_mask, (165, 85), (255, 175), 255, cv2.FILLED)
+    state.walls = [wall("ENCLOSURE", 150, 70, 270, 70, 12)]
+
+    semantic_masks.run(state)
+
+    assert state.room_region_mask[70, 210] == 0
+    assert state.room_region_mask[130, 210] == 255
+    assert state.wall_polygon_mask[70, 210] == 255
 
 
 def test_cleanup_protection_corridors_are_not_exported_as_semantic_walls():
@@ -128,6 +156,40 @@ def test_room_boundary_support_keeps_thin_partition_and_rejects_floating_rule():
     assert state.rejected_wall_candidate_mask[150, 130] == 255
     assert state.debug.segment_counts["13_supported_walls"] == 1
     assert state.debug.segment_counts["13_rejected_wall_candidates"] == 1
+
+
+def test_topology_restores_paired_partition_but_not_floating_room_rule():
+    state = PipelineState(config=PipelineConfig(
+        wall_region_room_support_min_rooms=3,
+        wall_region_room_support_radius_px=5,
+        wall_region_room_support_min_overlap=0.20,
+        wall_region_structural_restore_endpoint_radius_px=12,
+    ))
+    state.image = np.full((300, 520), 255, np.uint8)
+    state.rooms = [
+        Room("R1", [Point(20, 20), Point(210, 20), Point(210, 280), Point(20, 280)],
+             area=49400),
+        Room("R2", [Point(230, 20), Point(410, 20), Point(410, 280), Point(230, 280)],
+             area=46800),
+        Room("R3", [Point(430, 20), Point(500, 20), Point(500, 280), Point(430, 280)],
+             area=18200),
+    ]
+    left = wall("LEFT", 220, 20, 220, 280, 8)
+    right = wall("RIGHT", 420, 20, 420, 280, 8)
+    partition = wall("PARTITION", 220, 150, 420, 150, 8)
+    floating = wall("FLOATING", 260, 100, 380, 100, 8)
+    state.walls = [left, right, partition, floating]
+    state.junctions = [
+        Junction("J1", Point(220, 150), ["LEFT", "PARTITION"], "T"),
+        Junction("J2", Point(420, 150), ["RIGHT", "PARTITION"], "T"),
+    ]
+
+    semantic_masks.run(state)
+
+    assert state.wall_polygon_mask[150, 320] == 255
+    assert state.wall_polygon_mask[100, 320] == 0
+    assert state.rejected_wall_candidate_mask[100, 320] == 255
+    assert state.debug.segment_counts["13_topology_restored_walls"] == 1
 
 
 def test_exterior_ring_uses_room_inner_face_and_supported_shell_thickness():

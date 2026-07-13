@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from .geometry import angle_diff_rad
-from .line_filters import _DIMENSION_TEXT_RE
+from .line_filters import _DIMENSION_TEXT_RE, _has_dimension_text_nearby
 from .models import IdGenerator, LineSegment, PipelineState, Point
 from . import wall_extraction
 
@@ -39,8 +39,13 @@ def run(state: PipelineState) -> PipelineState:
         state.semantic_plan_mask = build_semantic_plan_mask(state)
 
     drafting = np.zeros_like(source)
+    confirmed_measurements = np.zeros_like(source)
+    measurement_context = np.zeros_like(source)
     classified = state.classified_lines
     dimension_segments = [s for s in classified if s.classification == "dimension"]
+    dimension_texts = [
+        text for text in state.raw_texts if _DIMENSION_TEXT_RE.search(text.text)
+    ]
 
     # Location is the strongest cue: retain only ink in the semantic plan
     # envelope, which already includes a configurable exterior-wall margin.
@@ -52,6 +57,30 @@ def run(state: PipelineState) -> PipelineState:
         if segment.classification in _REMOVAL_CLASSES:
             _draw_segment(drafting, segment, config)
             if segment.classification == "dimension":
+                if _has_dimension_text_nearby(segment, dimension_texts, config):
+                    _draw_segment(confirmed_measurements, segment, config)
+                    length = max(1e-6, segment.length)
+                    extension = float(
+                        config.wall_region_measurement_veto_extension_px
+                    )
+                    ux = (segment.end.x - segment.start.x) / length
+                    uy = (segment.end.y - segment.start.y) / length
+                    context_start = Point(
+                        segment.start.x - extension * ux,
+                        segment.start.y - extension * uy,
+                    )
+                    context_end = Point(
+                        segment.end.x + extension * ux,
+                        segment.end.y + extension * uy,
+                    )
+                    radius = max(
+                        1, int(config.wall_region_measurement_veto_radius_px)
+                    )
+                    cv2.line(
+                        measurement_context,
+                        _pixel(context_start), _pixel(context_end),
+                        255, 2 * radius + 1,
+                    )
                 radius = max(1, int(config.drafting_endpoint_radius_px))
                 for point in (segment.start, segment.end):
                     cv2.circle(drafting, _pixel(point), radius, 255, cv2.FILLED)
@@ -87,7 +116,15 @@ def run(state: PipelineState) -> PipelineState:
     # Restore original wall-face pixels and close only small, axis-aligned gaps
     # inside protected corridors. Door/window openings are much larger than the
     # repair kernel and remain open.
+    # A provisional wall corridor is permissive by design and may overlap an
+    # actual dimension baseline. The proposal classifier is also permissive:
+    # it marks many legitimate plan-border strokes as drafting based on
+    # location alone, and those still need protection. Suppress restoration
+    # only for measurement baselines independently confirmed by nearby,
+    # parallel dimension text. Directional closing below repairs the small
+    # holes those baselines cut through surviving wall faces.
     protected_ink = cv2.bitwise_and(source, protection)
+    protected_ink[confirmed_measurements > 0] = 0
     gap = max(1, int(config.drafting_repair_gap_px))
     horizontal = cv2.morphologyEx(
         protected_ink, cv2.MORPH_CLOSE, np.ones((1, gap), np.uint8)
@@ -113,12 +150,17 @@ def run(state: PipelineState) -> PipelineState:
         )
 
     state.drafting_mask = drafting
+    state.confirmed_measurement_mask = confirmed_measurements
+    state.measurement_context_mask = measurement_context
     state.interior_drafting_mask = interior_drafting
     state.structural_protection_mask = protection
     state.binary_cleaned = cleaned
     state.cleaned_image = cleaned_image
     state.binary_masked = cleaned
     state.debug.segment_counts["05_drafting_pixels"] = int(np.count_nonzero(drafting))
+    state.debug.segment_counts["05_confirmed_measurement_pixels"] = int(
+        np.count_nonzero(confirmed_measurements)
+    )
     state.debug.segment_counts["05_interior_drafting_pixels"] = int(
         np.count_nonzero(interior_drafting)
     )

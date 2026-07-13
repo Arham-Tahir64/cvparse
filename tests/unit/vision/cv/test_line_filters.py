@@ -71,6 +71,20 @@ def test_thin_with_metric_text_is_dimension():
     assert out[0].classification == "dimension"
 
 
+def test_long_dimension_uses_segment_to_rotated_text_distance():
+    # The label is near the lower end of a long vertical baseline. Its centre
+    # is far from the segment midpoint, but its edge is only 8 px away.
+    text = TextElement("17'-3\"", (208, 300, 224, 365), 0.9)
+    out = classify([seg(200, 40, 200, 450, thickness=1.3)], texts=[text])
+    assert out[0].classification == "dimension"
+
+
+def test_parallel_thin_wall_beyond_dimension_text_edge_distance_survives():
+    text = TextElement("17'-3\"", (208, 300, 224, 365), 0.9)
+    out = classify([seg(175, 40, 175, 450, thickness=1.3)], texts=[text])
+    assert out[0].classification == "unknown"
+
+
 def test_thick_with_ticks_not_dimension():
     main = seg(100, 100, 250, 100, thickness=5.0)
     tick1 = seg(100, 95, 100, 105)

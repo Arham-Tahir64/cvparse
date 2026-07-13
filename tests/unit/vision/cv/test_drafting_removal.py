@@ -47,6 +47,31 @@ def test_dimension_removed_while_paired_wall_faces_survive():
     assert state.debug.segment_counts["05_protected_walls"] == 1
 
 
+def test_crossing_dimension_is_not_restored_inside_wall_protection():
+    state = make_state()
+    # Two horizontal faces form a real wall. A vertical dimension baseline
+    # crosses both faces and the open room on either side.
+    cv2.line(state.binary_masked, (50, 100), (450, 100), 255, 2)
+    cv2.line(state.binary_masked, (50, 112), (450, 112), 255, 2)
+    cv2.line(state.binary_masked, (250, 35), (250, 265), 255, 1)
+    state.binary = state.binary_masked.copy()
+    state.classified_lines = [
+        segment("W1", 50, 100, 450, 100, "unknown"),
+        segment("W2", 50, 112, 450, 112, "unknown"),
+        segment("D1", 250, 35, 250, 265, "dimension"),
+    ]
+    state.raw_texts = [TextElement("17'-3\"", (258, 160, 275, 220), 0.95)]
+
+    drafting_removal.run(state)
+
+    # Open-room portions stay removed even though the dimension intersects a
+    # protected wall corridor. Legitimate horizontal faces are repaired.
+    assert state.binary_cleaned[60, 250] == 0
+    assert state.binary_cleaned[200, 250] == 0
+    assert state.binary_cleaned[100, 250] == 255
+    assert state.binary_cleaned[112, 250] == 255
+
+
 def test_curved_door_geometry_is_not_removed():
     state = make_state()
     cv2.ellipse(state.binary_masked, (250, 150), (60, 60), 0, 0, 90, 255, 2)

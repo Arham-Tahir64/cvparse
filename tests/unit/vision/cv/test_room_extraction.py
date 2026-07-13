@@ -181,3 +181,28 @@ def test_semantic_raster_rooms_bridge_openings_and_keep_labels():
     assert len(state.rooms) == 2
     assert {room.label for room in state.rooms} == {"GUEST SUITE", "BATH"}
     assert all(len(room.polygon) >= 4 for room in state.rooms)
+
+
+def test_room_clip_rectangularizes_only_high_fill_manhattan_envelope():
+    state = PipelineState(config=PipelineConfig(
+        semantic_plan_margin_px=0,
+        semantic_plan_rectangularize_min_fill=0.90,
+    ))
+    state.image = np.full((300, 400), 255, np.uint8)
+    mask = np.zeros(state.image.shape, np.uint8)
+    cv2 = __import__("cv2")
+    cv2.fillPoly(mask, [np.array([
+        [50, 50], [350, 50], [350, 250], [320, 250], [50, 220],
+    ], np.int32)], 255)
+    mask = room_extraction._rectangularized_room_clip(state, mask)
+
+    assert mask[245, 60] == 255
+
+    mask = np.zeros(state.image.shape, np.uint8)
+    cv2.fillPoly(mask, [np.array([
+        [50, 50], [200, 50], [200, 150],
+        [350, 150], [350, 250], [50, 250],
+    ], np.int32)], 255)
+    mask = room_extraction._rectangularized_room_clip(state, mask)
+
+    assert mask[80, 300] == 0

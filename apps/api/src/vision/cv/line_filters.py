@@ -224,11 +224,29 @@ def _has_tick_marks(seg: LineSegment, segments: list[LineSegment], config) -> bo
 
 
 def _has_dimension_text_nearby(seg, dimension_texts: list[TextElement], config) -> bool:
-    mid = seg.midpoint
-    return any(
-        mid.distance_to(t.center) <= config.dimension_text_dist_px
-        for t in dimension_texts
-    )
+    """Associate a dimension baseline with nearby, parallel measurement text.
+
+    Architectural baselines are commonly much longer than their label, so
+    midpoint-to-centre distance rejects the correct association near either
+    end. Use distance to the complete segment instead, represented by an
+    expanded OCR rectangle, and require the line direction to agree with the
+    text box's major axis. The orientation check prevents nearby room labels
+    from turning unrelated thin structural faces into dimensions.
+    """
+    distance = float(config.dimension_text_dist_px)
+    angle_tolerance = math.radians(config.dimension_text_angle_tol_deg)
+    for text in dimension_texts:
+        x0, y0, x1, y1 = text.bbox
+        width = max(0.0, x1 - x0)
+        height = max(0.0, y1 - y0)
+        text_angle = 0.0 if width >= height else math.pi / 2
+        if angle_diff_rad(seg.angle_rad, text_angle) > angle_tolerance:
+            continue
+        expanded = (x0 - distance, y0 - distance,
+                    x1 + distance, y1 + distance)
+        if liang_barsky_intersects(seg.start, seg.end, expanded):
+            return True
+    return False
 
 
 def _background_runs(values: np.ndarray) -> list[int]:
