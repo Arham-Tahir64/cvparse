@@ -961,3 +961,53 @@ Proposed coupled change:
   source-supported face pairs for the remaining local wall error. Retain a
   change only if whole-image wall IoU and both highlighted regions do not
   regress.
+
+### Cycle 8 retained: separate semantic annotation from diagnostics
+
+- A wall-palette-only experiment changed the rendered wall to the reference
+  purple/opacity but was rejected: wall IoU fell 0.6374 -> 0.6268, macro IoU
+  0.4607 -> 0.4587, and foreground IoU 0.8674 -> 0.8647 because the purple wall
+  became ambiguous with the gym room class. Detector geometry was unchanged and
+  the experiment was fully reverted.
+- The subsequent wall error audit found a broader export fault: even when exact
+  semantic rasters were supplied, the renderer added structural ROI outlines,
+  gap boxes, junction circles, room polygon outlines, duplicate OCR labels, and
+  door hinge/leaf vectors. These are diagnostic evidence, not semantic classes,
+  and generated many false objects absent from the goal.
+- The PDF/image API now has an explicit `include_diagnostics` mode. Programmatic
+  callers retain the detailed diagnostic renderer by default, while the CLI's
+  final annotation uses clean semantic mode: exact room, wall, door, and window
+  masks plus a semantic-only legend. Diagnostic masks and the requested
+  seven-layer crops remain available as separate files.
+- The first uncached render exposed an unfinished room-polygon path that
+  PyMuPDF committed as a black fill in clean mode. That output was rejected,
+  clean mode now skips redundant vector room paths entirely, and a pixel-level
+  regression test verifies no opaque black room fill can recur.
+- Full rendered results versus Cycle 7: wall IoU 0.6374 -> 0.6465, door IoU
+  0.2077 -> 0.2323, window IoU 0.2190 -> 0.2919, room IoU 0.7789 -> 0.7999,
+  macro IoU 0.4607 -> 0.4927, foreground IoU 0.8674 -> 0.8734. Predicted
+  rendered objects fall from 21 -> 7 walls, 178 -> 55 doors, and 132 -> 7
+  windows because debug vectors no longer masquerade as semantic detections.
+- Direct masks and both registered structural cases are unchanged: measurement
+  crop wall IoU 0.7169, room IoU 0.9393, barriers 0 vertical / 2 horizontal;
+  missing-wall crop wall IoU 0.4528, boundary F1 0.7394, room IoU 0.6618.
+- Files changed: `annotate_pdf.py`, `annotate_cli.py`, renderer tests, and this
+  log. Commands: clean/diagnostic cached render comparison, targeted renderer
+  tests, full CV tests, full uncached `annotate_cli`, whole-image evaluator,
+  focused evaluator, and crop exporter.
+- Tests: 171 passed. Full uncached run: 378.4 s with the same 116 walls, 8
+  doors, 5 windows, 9/9 labeled rooms, 13 gaps, 654,286 wall pixels, and
+  59,796 window pixels as Cycle 7. Output:
+  `debug_output/highlight_cycle8_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle8_full.json`; intermediates:
+  `debug_output/highlight_cycle8_full_intermediates/`; seven-layer crops:
+  `debug_output/focus_cycle8_full/`.
+
+### Cycle 9 goal: improve remaining door geometry without debug artifacts
+
+- Door is again the lowest-overlap semantic class at IoU 0.2323. Audit the
+  eight exact exported sectors against reference door ownership, distinguishing
+  true localization/quadrant error from palette/opacity effects. Retain only a
+  source-supported geometry or class-ownership change that improves the full
+  annotation without regressing walls, windows, rooms, or either structural
+  crop.

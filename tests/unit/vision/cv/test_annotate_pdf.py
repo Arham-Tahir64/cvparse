@@ -132,6 +132,45 @@ def test_semantic_masks_preserve_door_and_window_ownership():
     assert rendered[195, 160, 2] > rendered[195, 160, 1]
 
 
+def test_clean_semantic_export_omits_diagnostic_vectors(monkeypatch):
+    state = run_state(monkeypatch)
+    result = state.to_takeoff_result()
+
+    verbose = annotate_image_as_pdf(
+        state.image, result, dpi=200,
+        roi_mask=state.structural_roi_mask, junctions=state.junctions,
+        wall_mask=state.wall_mask, door_mask=state.door_mask,
+        window_mask=state.window_mask,
+        room_instance_mask=state.room_instance_mask,
+        include_diagnostics=True,
+    )
+    clean = annotate_image_as_pdf(
+        state.image, result, dpi=200,
+        roi_mask=state.structural_roi_mask, junctions=state.junctions,
+        wall_mask=state.wall_mask, door_mask=state.door_mask,
+        window_mask=state.window_mask,
+        room_instance_mask=state.room_instance_mask,
+        include_diagnostics=False,
+    )
+
+    verbose_doc = fitz.open(stream=verbose, filetype="pdf")
+    clean_doc = fitz.open(stream=clean, filetype="pdf")
+    assert len(clean_doc[0].get_drawings()) < len(verbose_doc[0].get_drawings())
+    assert "KITCHEN" in verbose_doc[0].get_text()
+    assert "KITCHEN" not in clean_doc[0].get_text()
+    assert "door gaps" in verbose_doc[0].get_text()
+    assert "door gaps" not in clean_doc[0].get_text()
+    pix = clean_doc[0].get_pixmap(matrix=fitz.Matrix(200 / 72, 200 / 72), alpha=False)
+    rendered = np.frombuffer(pix.samples, np.uint8).reshape(
+        pix.height, pix.width, pix.n,
+    )[..., :3]
+    # Exact room rasters replace vector polygons in clean mode; no unfinished
+    # polygon path may be committed as an opaque black fill.
+    assert np.mean(rendered[250:550, 250:750]) > 100
+    verbose_doc.close()
+    clean_doc.close()
+
+
 def test_skip_stage_records_message():
     state = pipeline.run_pipeline_state(
         image=synthetic_plan(),

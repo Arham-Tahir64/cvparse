@@ -101,6 +101,7 @@ def main(argv=None) -> int:
             wall_mask=state.wall_mask,
             door_mask=state.door_mask, window_mask=state.window_mask,
             room_instance_mask=state.room_instance_mask,
+            include_diagnostics=False,
         )
     else:
         annotated = annotate_image_as_pdf(
@@ -109,6 +110,7 @@ def main(argv=None) -> int:
             wall_mask=state.wall_mask,
             door_mask=state.door_mask, window_mask=state.window_mask,
             room_instance_mask=state.room_instance_mask,
+            include_diagnostics=False,
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

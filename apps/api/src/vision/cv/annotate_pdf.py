@@ -62,6 +62,7 @@ def annotate_pdf_page(
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
     room_instance_mask: Optional[np.ndarray] = None,
+    include_diagnostics: bool = True,
 ) -> bytes:
     """Overlay detections on the original PDF page; returns single-page PDF bytes."""
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -74,6 +75,7 @@ def annotate_pdf_page(
         junctions=junctions, wall_mask=wall_mask,
         door_mask=door_mask, window_mask=window_mask,
         room_instance_mask=room_instance_mask,
+        include_diagnostics=include_diagnostics,
     )
     out = doc.tobytes()
     doc.close()
@@ -90,6 +92,7 @@ def annotate_image_as_pdf(
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
     room_instance_mask: Optional[np.ndarray] = None,
+    include_diagnostics: bool = True,
 ) -> bytes:
     """Create a PDF page from a raster image and overlay detections."""
     h, w = image.shape[:2]
@@ -104,6 +107,7 @@ def annotate_image_as_pdf(
         junctions=junctions, wall_mask=wall_mask,
         door_mask=door_mask, window_mask=window_mask,
         room_instance_mask=room_instance_mask,
+        include_diagnostics=include_diagnostics,
     )
     out = doc.tobytes()
     doc.close()
@@ -116,6 +120,7 @@ def _draw(
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
     room_instance_mask: Optional[np.ndarray] = None,
+    include_diagnostics: bool = True,
 ) -> None:
     shape = page.new_shape()
 
@@ -127,7 +132,11 @@ def _draw(
     # rather than filling simplified outer polygons.
     if room_instance_mask is not None:
         _insert_room_instance_mask(page, room_instance_mask, result.rooms)
-    for room in result.rooms:
+    for room in (
+        result.rooms
+        if room_instance_mask is None or include_diagnostics
+        else []
+    ):
         if len(room.polygon) < 3:
             continue
         points = [pt(p.x, p.y) for p in room.polygon]
@@ -137,7 +146,7 @@ def _draw(
                 color=COLORS["room_stroke"], fill=COLORS["room_fill"],
                 fill_opacity=0.25, width=1.0, closePath=True,
             )
-        else:
+        elif include_diagnostics:
             shape.finish(color=COLORS["room_stroke"], width=0.5, closePath=True)
 
     # A reconstructed raster wall region can contain fragmented contours and
@@ -150,7 +159,7 @@ def _draw(
         shape = page.new_shape()
 
     # structural ROI boundary
-    if roi_mask is not None:
+    if include_diagnostics and roi_mask is not None:
         contours, _ = cv2.findContours(
             roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -161,7 +170,7 @@ def _draw(
                 shape.finish(color=COLORS["roi"], width=1.2, dashes="[6 4] 0")
 
     # gap bounding boxes (dashed, under the wall strokes)
-    for gap in result.gaps:
+    for gap in result.gaps if include_diagnostics else []:
         rect = fitz.Rect(
             gap.bbox[0] * scale, gap.bbox[1] * scale,
             gap.bbox[2] * scale, gap.bbox[3] * scale,
@@ -196,7 +205,7 @@ def _draw(
             )
 
     # junctions
-    for junction in junctions or []:
+    for junction in (junctions or []) if include_diagnostics else []:
         radius = _JUNCTION_RADIUS_PT.get(junction.junction_type, 3.0)
         shape.draw_circle(pt(junction.point.x, junction.point.y), radius)
         shape.finish(color=COLORS["junction"], width=1.0)
@@ -214,7 +223,7 @@ def _draw(
         # leaf and hinge vectors are retained on top for geometric readability.
         _insert_semantic_mask(page, door_owned, COLORS["door"], 1.0)
         shape = page.new_shape()
-    for door in result.doors:
+    for door in result.doors if (include_diagnostics or door_mask is None) else []:
         hinge = pt(door.position.x, door.position.y)
         swing = pt(door.swing_end.x, door.swing_end.y)
         if door_mask is None and len(door.swing_arc) >= 2:
@@ -269,7 +278,7 @@ def _draw(
     shape.commit()
 
     # room labels and legend as text (separate insert calls)
-    for room in result.rooms:
+    for room in result.rooms if include_diagnostics else []:
         if not room.label or not room.polygon:
             continue
         cx = sum(p.x for p in room.polygon) / len(room.polygon) * scale
@@ -279,7 +288,7 @@ def _draw(
             color=COLORS["label"],
         )
 
-    _draw_legend(page, result)
+    _draw_legend(page, result, include_diagnostics=include_diagnostics)
 
 
 def _insert_wall_mask(page, wall_mask: np.ndarray) -> None:
@@ -330,17 +339,26 @@ def _insert_semantic_mask(
     )
 
 
-def _draw_legend(page, result: CVTakeoffResult) -> None:
-    entries = [
-        ("wall", f"walls ({len(result.walls)})", COLORS["wall"]),
-        ("wall_low", "walls, low confidence", COLORS["wall_low_conf"]),
-        ("door", f"doors ({len(result.doors)})", COLORS["door"]),
-        ("window", f"windows ({len(result.windows)})", COLORS["window"]),
-        ("gap_door", "door gaps", COLORS["gap_door"]),
-        ("gap_window", "window gaps", COLORS["gap_window"]),
-        ("junction", "junctions", COLORS["junction"]),
-        ("roi", "structural ROI", COLORS["roi"]),
-    ]
+def _draw_legend(
+    page, result: CVTakeoffResult, include_diagnostics: bool = True,
+) -> None:
+    if include_diagnostics:
+        entries = [
+            ("wall", f"walls ({len(result.walls)})", COLORS["wall"]),
+            ("wall_low", "walls, low confidence", COLORS["wall_low_conf"]),
+            ("door", f"doors ({len(result.doors)})", COLORS["door"]),
+            ("window", f"windows ({len(result.windows)})", COLORS["window"]),
+            ("gap_door", "door gaps", COLORS["gap_door"]),
+            ("gap_window", "window gaps", COLORS["gap_window"]),
+            ("junction", "junctions", COLORS["junction"]),
+            ("roi", "structural ROI", COLORS["roi"]),
+        ]
+    else:
+        entries = [
+            ("wall", "walls", COLORS["wall"]),
+            ("door", "doors", COLORS["door"]),
+            ("window", "windows", COLORS["window"]),
+        ]
     present_room_classes = []
     for room in result.rooms:
         class_key = room_class_key(room.label)
