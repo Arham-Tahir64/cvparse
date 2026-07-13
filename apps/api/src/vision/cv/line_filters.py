@@ -41,6 +41,11 @@ def run(state: PipelineState) -> PipelineState:
     segments = state.raw_lines
     texts = state.raw_texts
 
+    if state.semantic_plan_mask is None:
+        # Imported lazily to keep the stage modules independently testable.
+        from .room_extraction import build_semantic_plan_mask
+        state.semantic_plan_mask = build_semantic_plan_mask(state)
+
     padded_boxes = [
         (
             t.bbox[0] - config.text_bbox_pad_px,
@@ -86,6 +91,15 @@ def _classify(i, seg, segments, kd_tree, padded_boxes, texts, dimension_texts,
         mx, my = int(round(mid.x)), int(round(mid.y))
         if not (0 <= mx < w and 0 <= my < h) or state.structural_roi_mask[my, mx] == 0:
             return "text_baseline"
+
+    # Rule 0.25 - geometry outside the OCR-seeded architectural envelope is
+    # drafting context, regardless of unreliable LSD stroke thickness.
+    if state.semantic_plan_mask is not None:
+        mid = seg.midpoint
+        h, w = state.semantic_plan_mask.shape[:2]
+        mx, my = int(round(mid.x)), int(round(mid.y))
+        if not (0 <= mx < w and 0 <= my < h) or state.semantic_plan_mask[my, mx] == 0:
+            return "dimension"
 
     # Rule 0.5 - thin line outside the tight wall-mass (pre-dilation) core:
     # dimension strings live in the margins around the plan body

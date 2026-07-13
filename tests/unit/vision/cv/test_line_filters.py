@@ -10,7 +10,8 @@ def seg(x1, y1, x2, y2, thickness=1.0, sid=""):
     return LineSegment(Point(x1, y1), Point(x2, y2), thickness=thickness, id=sid)
 
 
-def make_state(lines, texts=(), binary=None, roi_mask=None, core_mask=None):
+def make_state(lines, texts=(), binary=None, roi_mask=None, core_mask=None,
+               semantic_mask=None):
     state = PipelineState(config=PipelineConfig())
     state.raw_lines = list(lines)
     state.raw_texts = list(texts)
@@ -20,6 +21,7 @@ def make_state(lines, texts=(), binary=None, roi_mask=None, core_mask=None):
         roi_mask = np.full((500, 500), 255, np.uint8)
     state.structural_roi_mask = roi_mask
     state.structural_core_mask = core_mask
+    state.semantic_plan_mask = semantic_mask
     return state
 
 
@@ -117,6 +119,22 @@ def test_thick_line_outside_core_mask_not_dimension():
     core[100:400, 100:400] = 255
     out = classify([seg(120, 50, 380, 50, thickness=6.0)], core_mask=core)
     assert out[0].classification != "dimension"
+
+
+def test_thick_line_outside_semantic_plan_is_drafting():
+    semantic = np.zeros((500, 500), np.uint8)
+    semantic[100:400, 100:400] = 255
+    out = classify([seg(120, 50, 380, 50, thickness=6.0)],
+                   semantic_mask=semantic)
+    assert out[0].classification == "dimension"
+
+
+def test_thin_wall_inside_semantic_plan_is_preserved():
+    semantic = np.zeros((500, 500), np.uint8)
+    semantic[100:400, 100:400] = 255
+    out = classify([seg(150, 250, 350, 250, thickness=1.5)],
+                   semantic_mask=semantic)
+    assert out[0].classification == "unknown"
 
 
 def test_thin_line_inside_core_mask_stays_unknown():

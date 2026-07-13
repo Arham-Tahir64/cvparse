@@ -229,6 +229,9 @@ class PipelineState:
     # hole-filled plan component BEFORE dilation: tight wall-mass coverage,
     # used by module 04 to flag thin lines outside the plan body
     structural_core_mask: Optional[np.ndarray] = None
+    # Convex envelope of semantic room regions, expanded to include wall bands.
+    # Module 04 uses it to reject drafting geometry outside the inferred plan.
+    semantic_plan_mask: Optional[np.ndarray] = None
     dpi: int = 200
     page_number: int = 0
     raw_lines: list[LineSegment] = field(default_factory=list)

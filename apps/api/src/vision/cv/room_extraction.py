@@ -170,6 +170,34 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     return rooms
 
 
+def build_semantic_plan_mask(state) -> np.ndarray | None:
+    """Return a room-derived plan envelope for upstream drafting filtering."""
+    if state.image is None:
+        return None
+    rooms = _semantic_raster_rooms(
+        state, float(state.image.shape[0] * state.image.shape[1]), IdGenerator("SEM")
+    )
+    if len(rooms) < state.config.semantic_room_min_seeds:
+        return None
+    points = np.array(
+        [[int(round(point.x)), int(round(point.y))]
+         for room in rooms for point in room.polygon],
+        dtype=np.int32,
+    )
+    if len(points) < 3:
+        return None
+    mask = np.zeros(state.image.shape[:2], np.uint8)
+    hull = cv2.convexHull(points.reshape(-1, 1, 2))
+    cv2.fillPoly(mask, [hull], 255)
+    margin = max(0, int(state.config.semantic_plan_margin_px))
+    if margin:
+        size = 2 * margin + 1
+        mask = cv2.dilate(
+            mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+        )
+    return mask
+
+
 def _room_label_seeds(state) -> list[tuple[str, float, int, int]]:
     config = state.config
     vocab = sorted(config.room_label_vocab, key=len, reverse=True)

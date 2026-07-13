@@ -140,3 +140,26 @@ This decouples room topology from false dimension walls, closes door/window inte
   `evaluation_output/semantic_rooms_full.json`.
 - Final room IoU 0.5050, room F1 0.6711, room boundary F1 0.4274;
   foreground IoU 0.5214 and macro IoU 0.1630.
+
+### Drafting-line redesign proposal
+
+- Failure: the structural-core component is connected to exterior dimension
+  strings and extension rows. LSD width is also unreliable (roughly 1-4 px
+  for both hairlines and wall faces), so 1,257 segments remain `unknown` and
+  151 parallel pairs become walls.
+- Replacement: construct a semantic plan envelope from the convex hull of
+  seeded room regions, dilated by a wall margin. Classify segments whose
+  midpoints lie outside that envelope as drafting annotations before wall
+  pairing. Lines inside the envelope still pass through the existing
+  text/tick/hatch logic, preserving legitimate thin interior walls.
+- Retained implementation: semantic margin ablation tested 50, 90, 130, and
+  180 px; 90 px best preserved exterior walls while excluding drafting rows.
+- Full run: 364.6 s, 151 walls, 9 doors, 37 windows, 8 labeled rooms, 46 gaps;
+  full suite 137 passed.
+- Classification: `unknown` 1,257 -> 906; `dimension` 28 -> 566.
+- Wall false-positive pixels 12,161 -> 6,965; precision 0.2717 -> 0.3726;
+  IoU 0.1089 -> 0.1135; boundary F1 0.2257 -> 0.2754.
+- Foreground IoU 0.5214 -> 0.5326. Door IoU moved 0.0012 -> 0.0010
+  because one marginal detection was removed; the structural gain was retained.
+- Output: `debug_output/semantic_refilter_full.{pdf,png}`; metrics:
+  `evaluation_output/semantic_refilter_full.json`.

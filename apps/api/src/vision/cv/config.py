@@ -142,6 +142,7 @@ class PipelineConfig:
     room_barrier_thickness_px: int = 7
     semantic_room_poly_epsilon_frac: float = 0.002
     semantic_room_seed_confidence: float = 0.6
+    semantic_plan_margin_px: int = 90
 
     # --- Module 10: OCR ---
     ocr_engine: Literal["paddle", "tesseract"] = "paddle"
