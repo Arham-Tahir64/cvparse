@@ -272,6 +272,9 @@ class PipelineState:
     junctions: list[Junction] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)
     doors: list[Door] = field(default_factory=list)
+    # Openings retained structurally after a later semantic pass resolves the
+    # object class to something other than a door (for example, a window).
+    suppressed_door_openings: list[Door] = field(default_factory=list)
     windows: list[Window] = field(default_factory=list)
     rooms: list[Room] = field(default_factory=list)
     # Pre-completion room geometry used only for exterior window context.

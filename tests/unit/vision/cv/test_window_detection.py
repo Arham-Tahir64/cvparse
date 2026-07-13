@@ -3,7 +3,7 @@ import numpy as np
 
 from vision.cv import window_detection
 from vision.cv.config import PipelineConfig
-from vision.cv.models import Gap, LineSegment, PipelineState, Point, Room, Wall
+from vision.cv.models import Door, Gap, LineSegment, PipelineState, Point, Room, Wall, Window
 
 
 def wall(wid, x1, y1, x2, y2, thickness=10.0):
@@ -162,6 +162,30 @@ def test_windows_do_not_split_walls():
     state = make_state([w], [], binary)
     window_detection.run(state)
     assert len(state.walls) == 1
+
+
+def test_framed_window_owns_conflicting_door_opening():
+    state = make_state([])
+    state.doors = [Door(
+        id="D0001", position=Point(200, 200), swing_end=Point(300, 200),
+        radius=100, wall_id="W0001", swing_direction="cw",
+        swing_arc=[Point(300, 200), Point(200, 300)], confidence=0.7,
+    )]
+    state.windows = [Window(
+        id="WD0001", position=Point(245, 200), width=80, wall_id="W0002",
+    )]
+    state.gaps = [Gap(
+        id="G0001", wall_id="W0001", orientation="H", center=Point(200, 200),
+        width_px=100, bbox=(100, 100, 300, 300), kind="door",
+        wall_break_score=0.25, opening_fill_ratio=0.9,
+    )]
+
+    window_detection._resolve_door_window_conflicts(state)
+
+    assert state.doors == []
+    assert [door.id for door in state.suppressed_door_openings] == ["D0001"]
+    assert state.gaps == []
+    assert state.debug.segment_counts["08_door_window_conflicts"] == 1
 
 
 def test_exterior_context_requires_room_hull_boundary():

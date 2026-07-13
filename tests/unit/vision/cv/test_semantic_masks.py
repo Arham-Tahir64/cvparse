@@ -60,6 +60,22 @@ def test_room_and_door_masks_are_exported_separately():
     assert tuple(state.combined_class_mask[120, 120]) == semantic_masks.CLASS_COLORS["door"]
 
 
+def test_suppressed_door_keeps_wall_opening_without_exporting_sector():
+    state = PipelineState(config=PipelineConfig())
+    state.image = np.full((260, 400), 255, np.uint8)
+    state.walls = [wall("W1", 40, 100, 360, 100)]
+    state.suppressed_door_openings = [Door(
+        "D1", Point(180, 100), Point(180, 180), 80, "W1", "cw",
+        swing_arc=[Point(260, 100), Point(237, 157), Point(180, 180)],
+    )]
+
+    semantic_masks.run(state)
+
+    assert np.count_nonzero(state.door_mask) == 0
+    assert state.wall_mask[100, 220] == 0
+    assert state.wall_mask[100, 80] == 255
+
+
 def test_exact_room_raster_preserves_internal_wall_holes():
     state = PipelineState(config=PipelineConfig(
         wall_region_room_support_min_rooms=2,

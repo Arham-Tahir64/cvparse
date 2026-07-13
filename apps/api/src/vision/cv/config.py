@@ -165,6 +165,8 @@ class PipelineConfig:
     door_min_leaf_support: float = 0.18
     door_split_t_min: float = 0.1              # split only if hinge parameter in (min, max)
     door_split_t_max: float = 0.9
+    door_window_conflict_radius_ratio: float = 0.65
+    door_window_conflict_width_ratio: float = 0.75
     wall_erase_extra_px: int = 4               # extra thickness when erasing walls
 
     # --- Module 08: Windows ---

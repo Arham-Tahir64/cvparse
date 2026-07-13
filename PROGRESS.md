@@ -814,3 +814,46 @@ Proposed coupled change:
   radius, quadrant, and duplicate-sector errors. Retain only a geometrically
   explainable correction that raises door IoU without reducing wall, window,
   room, or either highlighted-region metric.
+
+### Cycle 5 retained: resolve contradictory door/window classifications
+
+- Per-sector audit found two zero-overlap door sectors. A simple composite
+  confidence gate at 0.60 removed one and raised direct door IoU 0.2234 ->
+  0.2319, but rendered wall IoU regressed 0.6385 -> 0.6354 because its wall
+  opening was real. That experiment was reverted.
+- Quadrant audit showed the other weak sector was generated from a fixture arc
+  48 px away from a valid opening. Mirroring it would add 193 true door pixels,
+  but the source arc supports the current quadrant, so a goal-driven mirror was
+  explicitly rejected as non-generalizable.
+- The remaining zero-overlap sector was uniquely co-located with an independently
+  detected exterior framed window: its window center is within both 0.65x the
+  alleged door radius and 0.75x the detected window width. No other door/window
+  pair satisfies both constraints. A physical opening is now prevented from
+  being exported as both classes when that strong conflict occurs.
+- Conflict resolution removes the contradictory door object and diagnostic gap
+  but retains its structural opening separately. Semantic wall reconstruction
+  continues to subtract that opening/footprint, avoiding the wall regression;
+  the window owns the exported class. Two tests cover conflict resolution and
+  structural-opening retention without a door sector.
+- Full rendered results versus Cycle 4: wall IoU 0.6385 -> 0.6389, door IoU
+  0.1707 -> 0.1763, window IoU 0.1983 -> 0.1990, room IoU 0.7756 -> 0.7783,
+  macro IoU 0.4458 -> 0.4481. Direct door IoU improves 0.2234 -> 0.2361 and
+  precision 0.5616 -> 0.6521. Foreground IoU changes 0.8548 -> 0.8544 while
+  every semantic class IoU improves; this is a 0.0004 ownership-boundary shift.
+- Both highlighted cases remain exact: recreation room wall IoU 0.7169, room
+  IoU 0.9158, barriers 0 vertical / 2 horizontal; missing-wall crop wall IoU
+  0.4528, boundary F1 0.7394, room IoU 0.6593.
+- Tests: 164 passed. Full uncached run: 390.9 s, 116 walls, 8 exported doors,
+  7 windows, 8/8 rooms, 15 gaps. Output:
+  `debug_output/highlight_cycle5_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle5_full.json`; intermediates:
+  `debug_output/highlight_cycle5_full_intermediates/`; seven-layer crops:
+  `debug_output/focus_cycle5_full/`.
+
+### Cycle 6 goal: reassess the largest remaining whole-image mismatch
+
+- Door remains the lowest class at IoU 0.1763, with one known fixture-derived
+  mirrored sector and incomplete recall. Further rule-based quadrant changes
+  are unsafe without source-supported arc evidence. Inspect whether a wall-gap-
+  seeded detector can recover missing hinges from opening plus leaf evidence;
+  otherwise document the need for labeled door examples or a learned detector.

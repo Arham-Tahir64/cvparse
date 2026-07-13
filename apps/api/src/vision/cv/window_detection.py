@@ -60,6 +60,7 @@ def run(state: PipelineState) -> PipelineState:
         )
 
     state.windows = windows
+    _resolve_door_window_conflicts(state)
     state.debug.segment_counts["08_windows"] = len(windows)
     logger.info("detected %d windows", len(windows))
 
@@ -70,6 +71,44 @@ def run(state: PipelineState) -> PipelineState:
             visualize(state, state.image),
         )
     return state
+
+
+def _resolve_door_window_conflicts(state: PipelineState) -> None:
+    """Prefer a supported window when one opening was also called a door.
+
+    Door detection runs first so wall gaps cannot become windows. Strategy A,
+    however, can independently find a framed exterior opening on a split wall
+    with a different ID. If its span contains the alleged hinge and occupies a
+    substantial fraction of the swing radius, exporting both classes creates
+    a full false door sector. Preserve the split/opening, but remove the
+    conflicting door object and its diagnostic door gap.
+    """
+    config = state.config
+    conflicts = []
+    for door in state.doors:
+        for window in state.windows:
+            distance = door.position.distance_to(window.position)
+            if (
+                distance <= config.door_window_conflict_radius_ratio * door.radius
+                and distance <= config.door_window_conflict_width_ratio * window.width
+            ):
+                conflicts.append(door)
+                break
+    if not conflicts:
+        state.debug.segment_counts["08_door_window_conflicts"] = 0
+        return
+
+    conflict_ids = {door.id for door in conflicts}
+    state.suppressed_door_openings.extend(conflicts)
+    state.doors = [door for door in state.doors if door.id not in conflict_ids]
+    state.gaps = [
+        gap for gap in state.gaps
+        if not (
+            gap.kind == "door"
+            and any(gap.center.distance_to(door.position) <= 2.0 for door in conflicts)
+        )
+    ]
+    state.debug.segment_counts["08_door_window_conflicts"] = len(conflicts)
 
 
 # ---------------------------------------------------------------------------

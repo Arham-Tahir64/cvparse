@@ -37,6 +37,7 @@ def run(state: PipelineState) -> PipelineState:
     wall_polygons = np.zeros(shape, np.uint8)
     rejected_wall_candidates = np.zeros(shape, np.uint8)
     door_mask = np.zeros(shape, np.uint8)
+    suppressed_door_mask = np.zeros(shape, np.uint8)
     window_mask = np.zeros(shape, np.uint8)
     room_mask = np.zeros(shape, np.uint8)
 
@@ -154,6 +155,14 @@ def run(state: PipelineState) -> PipelineState:
                 dtype=np.int32,
             )
             cv2.fillPoly(door_mask, polygon, 255)
+    for door in state.suppressed_door_openings:
+        if len(door.swing_arc) >= 2:
+            polygon = np.asarray(
+                [[_pixel(door.position)] + [_pixel(point) for point in door.swing_arc]],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(suppressed_door_mask, polygon, 255)
+    for door in [*state.doors, *state.suppressed_door_openings]:
         wall = _wall_for_door(state.walls, door)
         if wall is not None and door.swing_arc:
             # First arc sample is the closed/jamb endpoint; clear exactly the
@@ -167,6 +176,7 @@ def run(state: PipelineState) -> PipelineState:
     # wall corridors. Subtract after repair so closure cannot bridge them.
     wall_mask[door_openings > 0] = 0
     wall_mask[door_mask > 0] = 0
+    wall_mask[suppressed_door_mask > 0] = 0
     wall_mask[window_mask > 0] = 0
 
     combined = np.zeros((*shape, 3), np.uint8)
