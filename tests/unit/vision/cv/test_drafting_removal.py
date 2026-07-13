@@ -40,6 +40,7 @@ def test_dimension_removed_while_paired_wall_faces_survive():
     drafting_removal.run(state)
 
     assert state.drafting_mask[220, 250] == 255
+    assert state.interior_drafting_mask[220, 250] == 255
     assert state.binary_cleaned[220, 250] == 0
     assert state.binary_cleaned[100, 250] == 255
     assert state.binary_cleaned[112, 250] == 255
@@ -74,3 +75,5 @@ def test_ink_outside_semantic_plan_envelope_is_removed():
 
     assert state.binary_cleaned[20, 250] == 0
     assert state.binary_cleaned[80, 250] == 255
+    assert state.drafting_mask[20, 250] == 255
+    assert state.interior_drafting_mask[20, 250] == 0

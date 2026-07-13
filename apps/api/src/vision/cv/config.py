@@ -110,6 +110,11 @@ class PipelineConfig:
     # Short walls remain represented by the clean-pass polygon mask.
     wall_region_axis_min_run_px: int = 161
     wall_region_gap_close_px: int = 21
+    # Interior face-pair distances are often bimodal when parallel dimension
+    # rules are mistaken for wall faces. Estimate the structural mode from a
+    # lower quantile, then allow modest variation above it.
+    wall_region_interior_width_quantile: float = 0.40
+    wall_region_interior_width_scale: float = 1.15
     exterior_wall_min_side_support: float = 0.45
     exterior_wall_min_rectangularity: float = 0.85
 

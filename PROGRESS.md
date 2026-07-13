@@ -450,3 +450,98 @@ does not use global dilation or any coordinate from the reference annotation.
   `wall_boundaries.png`, `wall_polygons.png`, `exterior_wall_ring.png`,
   `wall_repaired_mask.png`, `wall_mask.png`, `combined_class_mask.png`, and
   `wall_error_vs_goal.png`.
+
+## Interior drafting and local-thickness redesign (in progress)
+
+### Reproducible baseline and failure decomposition
+
+- Preserved baseline: commit `8cff946`, full result
+  `evaluation_output/wall_regions_full.json` (wall IoU 0.5398, precision
+  0.6068, recall 0.8301, boundary F1 0.5637). The working tree contained only
+  the user's untracked `.claude/` directory and `goal.png`; neither will be
+  modified or committed.
+- A cached replay of the same detected state was saved only in ignored debug
+  output. At native mask resolution, the exterior-ring component is reliable
+  (precision 0.8248, IoU 0.5665), but the clean-pass wall polygons have only
+  0.4852 precision and the proposal protection corridors only 0.5271.
+- Proposal corridors contribute 5,965 exclusive false-positive pixels. They
+  were designed as a permissive cleanup veto, not as a semantic wall detector;
+  exporting them converts protected dimension/leader geometry into wall area.
+- Paired-face separations are bimodal: the lower structural mode is roughly
+  6--35 px, while numerous 52--74 px pairs span unrelated parallel drafting
+  lines. Rendering the larger of face separation and visual thickness makes
+  these false pairs into very broad walls. The 17 single-face fallbacks have
+  only 49 true-positive versus 195 false-positive pixels on this input.
+- Controlled ablation, with no reference coordinates or labels used by the
+  pipeline, shows that excluding cleanup-only proposal corridors from semantic
+  export and bounding interior widths at 25 px improves direct wall IoU from
+  0.5323 to 0.5929 and precision from 0.591 to 0.708 (recall 0.843 to 0.785).
+
+### Proposed replacement before implementation
+
+1. Keep structural-protection corridors solely in the drafting-cleanup stage;
+   semantic wall export will use final detected wall evidence plus the
+   separately evidence-gated exterior shell.
+2. Estimate a plan-specific interior wall-width ceiling from the lower,
+   consistent mode of paired-face separations. Apply it per interior wall,
+   preserving the independently measured exterior shell rather than globally
+   dilating or eroding the class mask.
+3. Add topology and room-boundary support for ambiguous single-face/floating
+   candidates so thin legitimate partitions remain eligible while isolated
+   measurement rules do not automatically become walls.
+4. Export a dedicated interior drafting/measurement mask in addition to the
+   combined drafting mask, so the removal decision and residual failure mode
+   are directly inspectable.
+5. Re-run unit tests, cached comparison, and the complete raw pipeline. Keep
+   the redesign only if wall precision/IoU and visual drafting separation
+   improve without material room, door, window, or corridor regression.
+
+### Cleanup/semantic separation and local width retained
+
+- Cleanup-only protection corridors are no longer unioned into the semantic
+  wall class. Final wall regions now use clean-pass detections plus the
+  independently supported exterior shell. This removes the largest source of
+  false wall area without changing upstream room, door, or window proposals.
+- Interior polygon width is bounded by a plan-specific estimate: the 40th
+  percentile of valid paired-face distances with 15% tolerance. It evaluates
+  to about 25 px on this plan, but adapts to the observed structural mode on
+  other scales and plans. The exterior ring keeps its independently measured
+  67 px shell; there is no global dilation or erosion.
+- A dedicated `interior_drafting_mask` is now part of pipeline state and is
+  exported in both drafting and semantic debug stages. It contains 457,012
+  native-resolution pixels on the full run, separately from exterior notes,
+  schedules, and dimension strings in the combined 1,096,858-pixel drafting
+  mask.
+- Tests: 153 passed. Valid raw run with PaddleOCR: 385.3 s, 124 walls, 4
+  doors, 7 windows, 8/8 labeled rooms, and 11 gaps. A sandboxed run that could
+  not read the OCR cache was discarded and is not used below.
+- Full-run commands: `python -m pytest -q`; `python -m
+  vision.cv.annotate_cli 112125_14_ARCH-3.pdf
+  debug_output/interior_width_full.pdf --preview
+  debug_output/interior_width_full.png --debug-dir
+  debug_output/interior_width_full_intermediates`; evaluator `python
+  tools/evaluate_annotation.py 112125_14_ARCH-3.pdf goal.png
+  debug_output/interior_width_full.png --output
+  evaluation_output/interior_width_full.json`.
+
+| Metric | Previous full | Local-width full | Change |
+|---|---:|---:|---:|
+| Wall precision | 0.6068 | 0.7272 | +0.1204 |
+| Wall recall | 0.8301 | 0.7815 | -0.0486 |
+| Wall F1 | 0.7011 | 0.7534 | +0.0523 |
+| Wall IoU | 0.5398 | 0.6043 | +0.0645 |
+| Wall boundary F1 | 0.5637 | 0.5727 | +0.0090 |
+| Door IoU | 0.1277 | 0.1372 | +0.0095 |
+| Window IoU | 0.2013 | 0.2046 | +0.0033 |
+| Room IoU | 0.5513 | 0.5546 | +0.0033 |
+| Macro IoU | 0.3550 | 0.3752 | +0.0202 |
+| Foreground IoU | 0.6979 | 0.6732 | -0.0247 |
+
+- Inspected full-run intermediates: combined and interior-only drafting masks,
+  cleaned binary, source wall boundaries, locally bounded wall polygons,
+  exterior ring, and final repaired wall mask. The exterior shell remains
+  complete and room/door/window geometry is preserved. Residual false wall
+  runs are now narrow and concentrated around storage/stair dimensions,
+  mechanical-room leaders, and a few unknown parallel clean-pass pairs. The
+  next iteration will test whether inferred room-boundary participation can
+  reject these floating rules without discarding legitimate thin partitions.

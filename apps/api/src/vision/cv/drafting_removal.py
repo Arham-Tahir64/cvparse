@@ -106,12 +106,22 @@ def run(state: PipelineState) -> PipelineState:
     cleaned_image = state.image.copy()
     cleaned_image[drafting > 0] = 255
 
+    interior_drafting = drafting.copy()
+    if state.semantic_plan_mask is not None:
+        interior_drafting = cv2.bitwise_and(
+            interior_drafting, state.semantic_plan_mask,
+        )
+
     state.drafting_mask = drafting
+    state.interior_drafting_mask = interior_drafting
     state.structural_protection_mask = protection
     state.binary_cleaned = cleaned
     state.cleaned_image = cleaned_image
     state.binary_masked = cleaned
     state.debug.segment_counts["05_drafting_pixels"] = int(np.count_nonzero(drafting))
+    state.debug.segment_counts["05_interior_drafting_pixels"] = int(
+        np.count_nonzero(interior_drafting)
+    )
     state.debug.segment_counts["05_protected_walls"] = len(provisional_walls)
 
     removed = int(np.count_nonzero(source)) - int(np.count_nonzero(cleaned))
@@ -124,6 +134,10 @@ def run(state: PipelineState) -> PipelineState:
         out_dir = os.path.join(config.debug_output_dir, MODULE)
         os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(os.path.join(out_dir, "drafting_mask.png"), drafting)
+        cv2.imwrite(
+            os.path.join(out_dir, "interior_drafting_mask.png"),
+            interior_drafting,
+        )
         cv2.imwrite(os.path.join(out_dir, "structural_protection_mask.png"), protection)
         cv2.imwrite(os.path.join(out_dir, "cleaned_binary.png"), cleaned)
         cv2.imwrite(os.path.join(out_dir, "cleaned_image.png"), cleaned_image)

@@ -239,6 +239,10 @@ class PipelineState:
     semantic_plan_mask: Optional[np.ndarray] = None
     # Dedicated pre-segmentation drafting removal products.
     drafting_mask: Optional[np.ndarray] = None
+    # Drafting pixels specifically inside the inferred plan envelope. Keeping
+    # these separate from schedules/notes outside the plan makes residual
+    # measurement-line errors directly inspectable.
+    interior_drafting_mask: Optional[np.ndarray] = None
     structural_protection_mask: Optional[np.ndarray] = None
     binary_cleaned: Optional[np.ndarray] = None
     cleaned_image: Optional[np.ndarray] = None

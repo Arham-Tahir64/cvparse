@@ -45,11 +45,14 @@ def run(state: PipelineState) -> PipelineState:
         polygon = np.asarray([[_pixel(point) for point in room.polygon]], np.int32)
         cv2.fillPoly(room_mask, polygon, 255)
 
+    interior_width_limit = _interior_wall_thickness_limit(state)
     line_lookup = {line.id: line for line in state.classified_lines}
     for wall in state.walls:
         if state.config.manhattan and wall.orientation == "diagonal":
             continue
-        _draw_wall_band(wall_polygons, wall, 255)
+        _draw_wall_band(
+            wall_polygons, wall, 255, thickness_limit=interior_width_limit,
+        )
         sources = [line_lookup[source_id] for source_id in wall.source_ids
                    if source_id in line_lookup]
         if sources:
@@ -61,31 +64,21 @@ def run(state: PipelineState) -> PipelineState:
         else:
             # Synthetic/programmatic walls may not retain source edges.
             contour = np.zeros(shape, np.uint8)
-            _draw_wall_band(contour, wall, 255)
+            _draw_wall_band(
+                contour, wall, 255, thickness_limit=interior_width_limit,
+            )
             wall_boundaries = cv2.bitwise_or(
                 wall_boundaries,
                 cv2.morphologyEx(contour, cv2.MORPH_GRADIENT,
                                  np.ones((3, 3), np.uint8)),
             )
 
-    # The proposal pass sees complete faces that the cleaned LSD pass can
-    # fragment. Both masks are independently supported structural geometry;
-    # their union recovers missing runs without admitting arbitrary image ink.
+    # Structural-protection corridors belong to the permissive cleanup pass:
+    # they preserve possible wall ink while drafting is removed, but are not
+    # independently validated wall regions. Semantic export therefore starts
+    # only from final clean-pass walls. This prevents protected dimension and
+    # leader pairs from being promoted to walls.
     reconstructed = wall_polygons.copy()
-    if state.structural_protection_mask is not None:
-        protection = state.structural_protection_mask
-        if state.config.manhattan:
-            run = max(3, int(state.config.wall_region_axis_min_run_px))
-            horizontal = cv2.morphologyEx(
-                protection, cv2.MORPH_OPEN, np.ones((1, run), np.uint8)
-            )
-            vertical = cv2.morphologyEx(
-                protection, cv2.MORPH_OPEN, np.ones((run, 1), np.uint8)
-            )
-            protection = cv2.bitwise_or(horizontal, vertical)
-        reconstructed = cv2.bitwise_or(
-            reconstructed, protection,
-        )
     if state.semantic_plan_mask is not None:
         reconstructed = cv2.bitwise_and(reconstructed, state.semantic_plan_mask)
 
@@ -151,6 +144,9 @@ def run(state: PipelineState) -> PipelineState:
     state.room_region_mask = room_mask
     state.combined_class_mask = combined
     state.debug.segment_counts["13_wall_pixels"] = int(np.count_nonzero(wall_mask))
+    state.debug.segment_counts["13_interior_width_limit_px"] = int(
+        round(interior_width_limit)
+    )
     state.debug.segment_counts["13_window_pixels"] = int(np.count_nonzero(window_mask))
 
     if state.config.debug_visualize and state.config.debug_output_dir:
@@ -158,6 +154,11 @@ def run(state: PipelineState) -> PipelineState:
         os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(os.path.join(out_dir, "wall_boundaries.png"), wall_boundaries)
         cv2.imwrite(os.path.join(out_dir, "wall_polygons.png"), wall_polygons)
+        if state.interior_drafting_mask is not None:
+            cv2.imwrite(
+                os.path.join(out_dir, "interior_drafting_mask.png"),
+                state.interior_drafting_mask,
+            )
         if exterior_ring is not None:
             cv2.imwrite(os.path.join(out_dir, "exterior_wall_ring.png"), exterior_ring)
         cv2.imwrite(os.path.join(out_dir, "wall_repaired_mask.png"), wall_mask)
@@ -174,10 +175,47 @@ def run(state: PipelineState) -> PipelineState:
     return state
 
 
-def _draw_wall_band(mask: np.ndarray, wall: Wall, value: int) -> None:
+def _draw_wall_band(
+    mask: np.ndarray, wall: Wall, value: int,
+    thickness_limit: float | None = None,
+) -> None:
+    thickness = _wall_thickness(wall)
+    if thickness_limit is not None:
+        thickness = min(thickness, max(1, int(round(thickness_limit))))
     cv2.line(
         mask, _pixel(wall.centerline.start), _pixel(wall.centerline.end), value,
-        _wall_thickness(wall),
+        thickness,
+    )
+
+
+def _interior_wall_thickness_limit(state: PipelineState) -> float:
+    """Estimate a robust plan-specific ceiling for interior wall regions.
+
+    Exterior thickness is reconstructed independently from sustained shell
+    faces. For interiors, the lower portion of paired-face separations is the
+    stable structural mode; distant parallel drafting rules occupy the upper
+    mode and must not determine polygon width.
+    """
+    config = state.config
+    measurements = [
+        max(wall.thickness, wall.visual_thickness)
+        for wall in state.walls
+        if wall.merge_kind == "paired_faces"
+        and (not config.manhattan or wall.orientation != "diagonal")
+        and config.wall_thickness_min_px <= max(
+            wall.thickness, wall.visual_thickness
+        ) <= config.wall_thickness_max_px
+    ]
+    if len(measurements) < 4:
+        return float(config.wall_thickness_max_px)
+    quantile = min(1.0, max(0.0, config.wall_region_interior_width_quantile))
+    estimate = float(np.quantile(measurements, quantile))
+    return min(
+        float(config.wall_thickness_max_px),
+        max(
+            float(config.wall_thickness_min_px),
+            estimate * float(config.wall_region_interior_width_scale),
+        ),
     )
 
 

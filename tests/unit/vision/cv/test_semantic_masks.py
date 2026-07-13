@@ -58,7 +58,7 @@ def test_room_and_door_masks_are_exported_separately():
     assert tuple(state.combined_class_mask[120, 120]) == semantic_masks.CLASS_COLORS["door"]
 
 
-def test_proposal_corridors_repair_fragments_but_openings_keep_ownership():
+def test_cleanup_protection_corridors_are_not_exported_as_semantic_walls():
     state = PipelineState(config=PipelineConfig(
         wall_region_axis_min_run_px=21,
     ))
@@ -72,11 +72,33 @@ def test_proposal_corridors_repair_fragments_but_openings_keep_ownership():
 
     assert state.wall_boundary_mask is not None
     assert state.wall_polygon_mask[100, 100] == 255
-    # The independent proposal corridor recovers the clean-pass missing run.
-    assert state.wall_repaired_mask[100, 350] == 255
+    # Cleanup protection is intentionally permissive and must not manufacture
+    # a semantic wall where the final clean pass found no wall.
+    assert state.wall_repaired_mask[100, 350] == 0
     # Window ownership is subtracted after reconstruction and gap repair.
     assert state.wall_repaired_mask[100, 260] == 0
     assert state.window_mask[100, 260] == 255
+
+
+def test_interior_width_uses_lower_consistent_face_pair_mode():
+    state = PipelineState(config=PipelineConfig(
+        wall_region_interior_width_quantile=0.40,
+        wall_region_interior_width_scale=1.15,
+    ))
+    state.image = np.full((300, 500), 255, np.uint8)
+    state.walls = [
+        wall("W1", 30, 50, 470, 50, 10),
+        wall("W2", 30, 100, 470, 100, 12),
+        wall("W3", 30, 150, 470, 150, 14),
+        wall("W4", 30, 230, 470, 230, 60),
+    ]
+
+    semantic_masks.run(state)
+
+    limit = state.debug.segment_counts["13_interior_width_limit_px"]
+    assert 13 <= limit <= 16
+    assert state.wall_polygon_mask[230 + limit, 250] == 0
+    assert state.wall_polygon_mask[230, 250] == 255
 
 
 def test_exterior_ring_uses_room_inner_face_and_supported_shell_thickness():
