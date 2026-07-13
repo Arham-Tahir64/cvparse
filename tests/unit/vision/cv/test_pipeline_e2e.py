@@ -31,10 +31,12 @@ def synthetic_plan():
     dwall(850, 150, 850, 650)
     dwall(850, 650, 150, 650)
     dwall(150, 650, 150, 150)
-    # continuous divider (open passages would merge the rooms into one face)
+    # divider with a 60 px door opening; semantic room closure bridges it
     dwall(500, 150, 500, 650)
+    img[399:462, 495:506] = 255
     # door arc against the divider, hinge mid-wall
     cv2.ellipse(img, (500, 460), (60, 60), 0, 180, 270, 0, 2)
+    cv2.line(img, (500, 460), (440, 460), 0, 2)
     return img
 
 
@@ -47,7 +49,9 @@ def test_full_pipeline(synthetic_plan, monkeypatch):
 
     result = pipeline.run_pipeline(
         image=synthetic_plan,
-        config=PipelineConfig(hough_circles_param2=25.0),
+        config=PipelineConfig(
+            hough_circles_param2=25.0, door_arc_min_radius_px=20.0,
+        ),
     )
 
     assert len(result.walls) >= 4

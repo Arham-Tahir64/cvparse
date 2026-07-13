@@ -6,7 +6,7 @@ Every detection type gets its own color (matching the SVG overlay scheme):
 
 - walls: red; walls with merge_confidence < 0.6: orange
 - junctions: blue circles (radius by type)
-- doors: green hinge dot + swing arc
+- doors: green hinge/leaf + translucent quarter-swing sector
 - windows: dark orange tick across the wall
 - door gaps: green dashed bbox; window gaps: orange dashed bbox
 - rooms: light-blue fill with gray outline and label
@@ -148,16 +148,22 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         shape.draw_circle(pt(junction.point.x, junction.point.y), radius)
         shape.finish(color=COLORS["junction"], width=1.0)
 
-    # doors: hinge dot + chord to swing end + arc
+    # Doors: bounded swing sector, leaf, and hinge. The detector exports the
+    # observed quarter arc; never invent a full circle around the hinge.
     for door in result.doors:
         hinge = pt(door.position.x, door.position.y)
         swing = pt(door.swing_end.x, door.swing_end.y)
+        if len(door.swing_arc) >= 2:
+            arc = [pt(point.x, point.y) for point in door.swing_arc]
+            shape.draw_polyline([hinge] + arc + [hinge])
+            shape.finish(
+                color=COLORS["door"], fill=COLORS["door"], width=0.9,
+                stroke_opacity=0.9, fill_opacity=0.24,
+            )
         shape.draw_circle(hinge, 2.5)
         shape.finish(color=COLORS["door"], fill=COLORS["door"], width=0.8)
         shape.draw_line(hinge, swing)
         shape.finish(color=COLORS["door"], width=1.2)
-        shape.draw_circle(hinge, door.radius * scale)
-        shape.finish(color=COLORS["door"], width=0.9, dashes="[2 2] 0")
 
     # windows: tick perpendicular-ish marker at the window position
     for window in result.windows:

@@ -32,8 +32,12 @@ def make_result(walls=(), doors=(), rooms=(), gaps=()):
 
 
 def full_result():
-    door = Door(id="D0001", position=Point(100, 20), swing_end=Point(140, 60),
-                radius=40.0, wall_id="W0001", swing_direction="cw")
+    door = Door(
+        id="D0001", position=Point(100, 20), swing_end=Point(140, 60),
+        radius=40.0, wall_id="W0001", swing_direction="cw",
+        swing_arc=[Point(140, 20), Point(128, 48), Point(100, 60)],
+        confidence=0.81,
+    )
     room = Room(id="R0001", polygon=[Point(0, 0), Point(100, 0), Point(100, 80),
                                      Point(0, 80)], label="KITCHEN",
                 label_confidence=0.92, area=8000.0)
@@ -52,6 +56,8 @@ def test_round_trip_json():
     assert parsed["walls"][0]["merge_kind"] == "paired_faces"
     assert parsed["walls"][0]["source_ids"] == ["L00001", "L00002"]
     assert parsed["doors"][0]["swing_direction"] == "cw"
+    assert len(parsed["doors"][0]["swing_arc"]) == 3
+    assert parsed["doors"][0]["confidence"] == 0.81
     assert parsed["rooms"][0]["label"] == "KITCHEN"
     assert parsed["metadata"]["wall_count"] == 2
 
@@ -105,6 +111,14 @@ def test_gap_serializes_with_kind():
     data = serialize.to_json_dict(full_result())
     assert data["gaps"][0]["kind"] == "door"
     assert data["gaps"][0]["wall_break_score"] == 0.25
+
+
+def test_adapter_exports_door_geometry():
+    doc = to_annotation_document(full_result())
+    door = next(element for element in doc["elements"] if element["type"] == "door")
+    assert door["geometry"]["kind"] == "swing"
+    assert len(door["geometry"]["arc"]) == 3
+    assert door["relations"]["wall_id"] == "W0001"
 
 
 def test_adapter_wall_element():

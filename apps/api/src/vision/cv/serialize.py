@@ -93,6 +93,8 @@ def to_json_dict(result: CVTakeoffResult) -> dict[str, Any]:
                 "wall_id": d.wall_id,
                 "swing_direction": d.swing_direction,
                 "opens_into_room_id": d.opens_into_room_id,
+                "swing_arc": [_point(point) for point in d.swing_arc],
+                "confidence": _num(d.confidence),
             }
             for d in result.doors
         ],
@@ -183,11 +185,19 @@ def to_svg(
 
     for door in result.doors:
         p, s = door.position, door.swing_end
-        sweep = 1 if door.swing_direction == "cw" else 0
+        if len(door.swing_arc) >= 2:
+            points = " ".join(
+                f"L {_num(point.x)} {_num(point.y)}" for point in door.swing_arc
+            )
+            parts.append(
+                f'<path d="M {_num(p.x)} {_num(p.y)} {points} Z" '
+                'fill="#2ca02c" fill-opacity="0.24" stroke="#2ca02c" '
+                'stroke-width="1.5"/>'
+            )
         parts.append(
-            f'<path d="M {_num(s.x)} {_num(s.y)} A {_num(door.radius)} '
-            f'{_num(door.radius)} 0 0 {sweep} {_num(p.x)} {_num(p.y)}" '
-            'fill="none" stroke="#2ca02c" stroke-width="1.5"/>'
+            f'<line x1="{_num(p.x)}" y1="{_num(p.y)}" '
+            f'x2="{_num(s.x)}" y2="{_num(s.y)}" '
+            'stroke="#2ca02c" stroke-width="1.5"/>'
         )
         parts.append(
             f'<circle cx="{_num(p.x)}" cy="{_num(p.y)}" r="3" fill="#2ca02c"/>'

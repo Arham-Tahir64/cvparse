@@ -44,4 +44,37 @@ def to_annotation_document(result: CVTakeoffResult) -> dict[str, Any]:
             "area_px": room.area,
         })
 
+    for door in result.doors:
+        elements.append({
+            "type": "door",
+            "id": door.id,
+            "geometry": {
+                "kind": "swing",
+                "hinge": {"x": door.position.x, "y": door.position.y},
+                "leaf_end": {"x": door.swing_end.x, "y": door.swing_end.y},
+                "arc": [{"x": p.x, "y": p.y} for p in door.swing_arc],
+                "radius_px": door.radius,
+                "swing_direction": door.swing_direction,
+            },
+            "relations": {
+                "wall_id": door.wall_id,
+                "opens_into_room_id": door.opens_into_room_id,
+            },
+            "confidence": door.confidence,
+            "review_state": "pending",
+        })
+
+    for window in result.windows:
+        elements.append({
+            "type": "window",
+            "id": window.id,
+            "geometry": {
+                "kind": "opening",
+                "center": {"x": window.position.x, "y": window.position.y},
+                "width_px": window.width,
+            },
+            "relations": {"wall_id": window.wall_id},
+            "review_state": "pending",
+        })
+
     return {"elements": elements}

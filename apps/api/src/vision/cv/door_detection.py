@@ -13,7 +13,7 @@ import os
 import cv2
 import numpy as np
 
-from .geometry import point_at_param, point_to_line_distance, project_param
+from .geometry import point_at_param, project_param
 from .junction_snapping import split_wall_at
 from .models import Door, Gap, IdGenerator, Junction, PipelineState, Point, Wall
 
@@ -39,31 +39,41 @@ def run(state: PipelineState) -> PipelineState:
 
     candidates = []
     for cx, cy, radius in circles:
-        coverage, mid_angle = _arc_coverage(erased, cx, cy, radius)
+        coverage, start_angle, end_angle = _arc_coverage(erased, cx, cy, radius)
         if not (config.arc_coverage_min <= coverage <= config.arc_coverage_max):
             continue
-        wall = _nearest_wall(Point(cx, cy), state.walls, config)
-        if wall is None:
+        if (state.semantic_plan_mask is not None and
+                not _mask_contains(state.semantic_plan_mask, cx, cy)):
             continue
-        candidates.append((radius, coverage, mid_angle, cx, cy, wall))
+        best = None
+        for wall in _nearby_walls(Point(cx, cy), state.walls, config):
+            geometry = _candidate_geometry(
+                binary, wall, cx, cy, radius, start_angle, end_angle, config,
+            )
+            if geometry is not None and (best is None or geometry[0] > best[0]):
+                best = (*geometry, wall)
+        if best is None:
+            continue
+        score, hinge, swing_end, swing_arc, wall = best
+        candidates.append(
+            (score, radius, coverage, cx, cy, wall, hinge, swing_end, swing_arc)
+        )
 
-    # dedup: larger radius wins, hinges within door_dedup_dist_px collapse
-    candidates.sort(key=lambda c: c[0], reverse=True)
+    # Dedup: strongest door evidence wins; hinge-near duplicates collapse.
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
     accepted: list[tuple] = []
     doors: list[Door] = []
-    for radius, coverage, mid_angle, cx, cy, wall in candidates:
+    for score, radius, coverage, cx, cy, wall, hinge, swing_end, swing_arc in candidates:
         cl = wall.centerline
-        t = min(1.0, max(0.0, project_param(Point(cx, cy), cl.start, cl.end)))
-        hinge = point_at_param(cl.start, cl.end, t)
+        t = min(1.0, max(0.0, project_param(hinge, cl.start, cl.end)))
         if any(hinge.distance_to(d.position) <= config.door_dedup_dist_px for d in doors):
             continue
 
-        swing_end = Point(cx + radius * math.cos(mid_angle),
-                          cy + radius * math.sin(mid_angle))
         swing = _swing_direction(cl, hinge, swing_end)
         door = Door(
             id=door_id_gen(), position=hinge, swing_end=swing_end, radius=float(radius),
-            wall_id=wall.id, swing_direction=swing,
+            wall_id=wall.id, swing_direction=swing, swing_arc=swing_arc,
+            confidence=float(score),
         )
         doors.append(door)
 
@@ -133,15 +143,19 @@ def _hough_circles(erased: np.ndarray, config) -> list[tuple[float, float, float
 def _arc_coverage(image: np.ndarray, cx: float, cy: float, radius: float):
     """Longest contiguous ink run around the circumference (with wraparound).
 
-    Returns (coverage_fraction, midpoint_angle_of_run).
+    Returns ``(coverage_fraction, start_angle, end_angle)`` for the longest
+    run. ``end_angle`` can exceed 2*pi when the run crosses angle zero; this
+    preserves a continuous ordered arc for exporters.
     """
     h, w = image.shape[:2]
     angles = np.linspace(0, 2 * math.pi, _ARC_SAMPLES, endpoint=False)
     on = []
+    radial_tolerance = max(2, min(6, int(round(radius * 0.04))))
     for a in angles:
         hit = False
-        # tolerate 1px radial jitter
-        for dr in (-1, 0, 1):
+        # Hough radii on thin anti-aliased PDF arcs routinely differ by a few
+        # pixels; use a scale-aware annulus instead of a fixed one-pixel ring.
+        for dr in range(-radial_tolerance, radial_tolerance + 1):
             x = int(round(cx + (radius + dr) * math.cos(a)))
             y = int(round(cy + (radius + dr) * math.sin(a)))
             if 0 <= x < w and 0 <= y < h and image[y, x] > 0:
@@ -150,9 +164,9 @@ def _arc_coverage(image: np.ndarray, cx: float, cy: float, radius: float):
         on.append(hit)
 
     if not any(on):
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     if all(on):
-        return 1.0, 0.0
+        return 1.0, 0.0, 2 * math.pi
 
     # longest run with wraparound: double the array
     doubled = on + on
@@ -168,22 +182,180 @@ def _arc_coverage(image: np.ndarray, cx: float, cy: float, radius: float):
         else:
             run = 0
     best_len = min(best_len, _ARC_SAMPLES)
-    mid_idx = (best_start + best_len // 2) % _ARC_SAMPLES
-    return best_len / _ARC_SAMPLES, float(angles[mid_idx])
+    step = 2 * math.pi / _ARC_SAMPLES
+    start_angle = (best_start % _ARC_SAMPLES) * step
+    end_angle = start_angle + max(0, best_len - 1) * step
+    return best_len / _ARC_SAMPLES, float(start_angle), float(end_angle)
 
 
-def _nearest_wall(center: Point, walls, config):
-    best, best_dist = None, float("inf")
+def _mask_contains(mask: np.ndarray, x: float, y: float) -> bool:
+    ix, iy = int(round(x)), int(round(y))
+    return 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix] > 0
+
+
+def _nearby_walls(center: Point, walls, config) -> list[Wall]:
+    nearby = []
     for wall in walls:
         cl = wall.centerline
-        t = project_param(center, cl.start, cl.end)
-        t = min(1.0, max(0.0, t))
-        dist = center.distance_to(point_at_param(cl.start, cl.end, t))
-        if dist < best_dist:
-            best, best_dist = wall, dist
-    if best is None or best_dist > config.door_wall_snap_px + best.thickness / 2.0:
+        t = min(1.0, max(0.0, project_param(center, cl.start, cl.end)))
+        distance = center.distance_to(point_at_param(cl.start, cl.end, t))
+        if distance <= config.door_wall_snap_px + wall.thickness / 2.0:
+            nearby.append((distance, wall))
+    nearby.sort(key=lambda item: item[0])
+    return [wall for _, wall in nearby[:6]]
+
+
+def _angle_error(a: float, b: float) -> float:
+    return abs((a - b + math.pi) % (2 * math.pi) - math.pi)
+
+
+def _candidate_geometry(
+    binary: np.ndarray,
+    wall: Wall,
+    cx: float,
+    cy: float,
+    radius: float,
+    start_angle: float,
+    end_angle: float,
+    config,
+):
+    """Validate a circle proposal using wall-opening and leaf evidence.
+
+    A door arc has one endpoint parallel to the supporting wall (the jamb)
+    and the other perpendicular (the open leaf). Structural wall ink should
+    continue behind the hinge but disappear through the opening.
+    """
+    cl = wall.centerline
+    dx, dy = cl.end.x - cl.start.x, cl.end.y - cl.start.y
+    length = math.hypot(dx, dy)
+    if length <= 1e-6:
         return None
-    return best
+    ux, uy = dx / length, dy / length
+    axis_angle = math.atan2(uy, ux)
+    endpoints = (start_angle, end_angle)
+    assignments = []
+    for closed_index in (0, 1):
+        closed_angle = endpoints[closed_index]
+        leaf_angle = endpoints[1 - closed_index]
+        parallel_error = min(
+            _angle_error(closed_angle, axis_angle),
+            _angle_error(closed_angle, axis_angle + math.pi),
+        )
+        perpendicular_error = min(
+            _angle_error(leaf_angle, axis_angle + math.pi / 2),
+            _angle_error(leaf_angle, axis_angle - math.pi / 2),
+        )
+        assignments.append((parallel_error + perpendicular_error,
+                            parallel_error, perpendicular_error,
+                            closed_angle, leaf_angle))
+    _, parallel_error, perpendicular_error, closed_angle, leaf_angle = min(assignments)
+    tolerance = math.radians(config.door_axis_angle_tol_deg)
+    if parallel_error > tolerance or perpendicular_error > tolerance:
+        return None
+
+    # Hough proposals and wall erasure commonly truncate 10-30 degrees from a
+    # thin arc. Once both endpoints agree with a rectilinear wall, snap them to
+    # the architectural parallel/perpendicular axes instead of exporting the
+    # truncated proposal angles.
+    closed_angle = min(
+        (axis_angle, axis_angle + math.pi),
+        key=lambda angle: _angle_error(closed_angle, angle),
+    )
+    leaf_angle = min(
+        (axis_angle + math.pi / 2, axis_angle - math.pi / 2),
+        key=lambda angle: _angle_error(leaf_angle, angle),
+    )
+
+    t = min(1.0, max(0.0, project_param(Point(cx, cy), cl.start, cl.end)))
+    hinge = point_at_param(cl.start, cl.end, t)
+    opening_sign = 1.0 if (math.cos(closed_angle) * ux +
+                           math.sin(closed_angle) * uy) >= 0 else -1.0
+    inset = max(5.0, wall.thickness * 0.7)
+    continuation = _structural_wall_support(
+        binary, hinge, ux, uy, -opening_sign,
+        inset, max(inset + 8.0, min(radius * 0.45, 55.0)), wall.thickness,
+    )
+    opening = _structural_wall_support(
+        binary, hinge, ux, uy, opening_sign,
+        inset, max(inset + 8.0, radius * 0.78), wall.thickness,
+    )
+    leaf_support = _radial_ink_support(binary, cx, cy, radius, leaf_angle)
+    if continuation < config.door_min_wall_continuation:
+        return None
+    if opening > config.door_max_opening_support:
+        return None
+    if leaf_support < config.door_min_leaf_support:
+        return None
+
+    arc_delta = (leaf_angle - closed_angle + math.pi) % (2 * math.pi) - math.pi
+    angles = np.linspace(closed_angle, closed_angle + arc_delta, 18)
+    swing_arc = [Point(
+        hinge.x + radius * math.cos(float(angle)),
+        hinge.y + radius * math.sin(float(angle)),
+    ) for angle in angles]
+    swing_end = Point(
+        hinge.x + radius * math.cos(leaf_angle),
+        hinge.y + radius * math.sin(leaf_angle),
+    )
+    alignment = 1.0 - (parallel_error + perpendicular_error) / (2 * tolerance)
+    score = (0.30 * continuation + 0.30 * (1.0 - opening) +
+             0.25 * leaf_support + 0.15 * max(0.0, alignment))
+    return score, hinge, swing_end, swing_arc
+
+
+def _structural_wall_support(
+    binary: np.ndarray,
+    hinge: Point,
+    ux: float,
+    uy: float,
+    sign: float,
+    start: float,
+    end: float,
+    thickness: float,
+) -> float:
+    """Fraction of axis samples having a wall-width cross-section.
+
+    A thin door leaf or dimension line can put ink in the opening, but unlike a
+    wall face pair it does not span a meaningful fraction of wall thickness.
+    """
+    if end <= start:
+        return 0.0
+    h, w = binary.shape[:2]
+    half = max(3, int(round(thickness * 0.65)))
+    min_span = max(3.0, min(8.0, thickness * 0.35))
+    supports = []
+    for offset in np.linspace(start, end, max(8, int(end - start) + 1)):
+        x = hinge.x + sign * offset * ux
+        y = hinge.y + sign * offset * uy
+        ink_offsets = []
+        for cross in range(-half, half + 1):
+            ix = int(round(x - cross * uy))
+            iy = int(round(y + cross * ux))
+            if 0 <= ix < w and 0 <= iy < h and binary[iy, ix] > 0:
+                ink_offsets.append(cross)
+        supports.append(bool(ink_offsets) and
+                        max(ink_offsets) - min(ink_offsets) >= min_span)
+    return float(np.mean(supports)) if supports else 0.0
+
+
+def _radial_ink_support(
+    binary: np.ndarray, cx: float, cy: float, radius: float, angle: float,
+) -> float:
+    h, w = binary.shape[:2]
+    hits = []
+    for distance in np.linspace(radius * 0.15, radius * 0.88, 40):
+        x = int(round(cx + distance * math.cos(angle)))
+        y = int(round(cy + distance * math.sin(angle)))
+        hit = False
+        for oy in (-1, 0, 1):
+            for ox in (-1, 0, 1):
+                if 0 <= x + ox < w and 0 <= y + oy < h and binary[y + oy, x + ox] > 0:
+                    hit = True
+                    break
+            if hit:
+                break
+        hits.append(hit)
+    return float(np.mean(hits)) if hits else 0.0
 
 
 def _swing_direction(cl, hinge: Point, swing_end: Point) -> str:
@@ -241,7 +413,12 @@ def visualize(state: PipelineState, base_image: np.ndarray) -> np.ndarray:
     for door in state.doors:
         p = door.position
         cv2.circle(overlay, (int(p.x), int(p.y)), 4, (0, 200, 0), -1)
-        cv2.circle(overlay, (int(p.x), int(p.y)), int(door.radius), (0, 200, 0), 1)
+        if len(door.swing_arc) >= 2:
+            points = np.asarray(
+                [[round(point.x), round(point.y)] for point in door.swing_arc],
+                dtype=np.int32,
+            )
+            cv2.polylines(overlay, [points], False, (0, 200, 0), 2)
         cv2.line(overlay, (int(p.x), int(p.y)),
                  (int(door.swing_end.x), int(door.swing_end.y)), (0, 200, 0), 1)
     return overlay

@@ -22,7 +22,9 @@ def wall(wid, x1, y1, x2, y2, thickness=8.0):
 def make_state(walls, binary):
     # param2=25: thin synthetic quarter arcs need a lower accumulator
     # threshold than the field default (spec: tune 20-50)
-    state = PipelineState(config=PipelineConfig(hough_circles_param2=25.0))
+    state = PipelineState(config=PipelineConfig(
+        hough_circles_param2=25.0, door_arc_min_radius_px=20.0,
+    ))
     state.walls = list(walls)
     state.binary = binary
     state.binary_masked = binary.copy()
@@ -33,11 +35,20 @@ def make_state(walls, binary):
 def draw_arc(binary, cx, cy, radius, start_deg, end_deg, thickness=2):
     cv2.ellipse(binary, (cx, cy), (radius, radius), 0, start_deg, end_deg,
                 255, thickness)
+    angle = math.radians(end_deg)
+    cv2.line(binary, (cx, cy),
+             (round(cx + radius * math.cos(angle)),
+              round(cy + radius * math.sin(angle))), 255, thickness)
+
+
+def open_wall(binary, cx, radius, y=200, thickness=9):
+    binary[y - thickness // 2:y + thickness // 2 + 1, cx:cx + radius + 2] = 0
 
 
 def test_quarter_arc_near_wall_detected():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255           # horizontal wall band
+    open_wall(binary, 300, 50)
     draw_arc(binary, 300, 200, 50, 0, 90)   # hinge on the wall, opens south
     state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
     door_detection.run(state)
@@ -64,6 +75,15 @@ def test_full_circle_rejected():
     assert state.doors == []
 
 
+def test_fixture_arc_on_uninterrupted_wall_rejected():
+    binary = np.zeros((400, 600), np.uint8)
+    binary[196:205, 50:550] = 255
+    draw_arc(binary, 300, 200, 50, 0, 90)
+    state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
+    door_detection.run(state)
+    assert state.doors == []
+
+
 def test_arc_far_from_walls_rejected():
     binary = np.zeros((500, 600), np.uint8)
     binary[46:55, 50:550] = 255
@@ -76,6 +96,7 @@ def test_arc_far_from_walls_rejected():
 def test_swing_direction_south_arc():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255
+    open_wall(binary, 300, 50)
     draw_arc(binary, 300, 200, 50, 0, 90)   # south of a horizontal wall
     state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
     door_detection.run(state)
@@ -87,6 +108,7 @@ def test_swing_direction_south_arc():
 def test_two_close_arcs_one_door():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255
+    open_wall(binary, 300, 55)
     draw_arc(binary, 300, 200, 50, 10, 90)
     draw_arc(binary, 305, 200, 45, 10, 90)
     state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
@@ -97,6 +119,7 @@ def test_two_close_arcs_one_door():
 def test_wall_split_at_hinge():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 100:500] = 255
+    open_wall(binary, 260, 50)
     draw_arc(binary, 260, 200, 50, 0, 90)   # t = 0.4 along a 400 px wall
     state = make_state([wall("W0001", 100, 200, 500, 200)], binary)
     door_detection.run(state)
@@ -119,6 +142,7 @@ def test_no_circles_no_doors_no_error():
 def test_split_children_carry_provenance():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 100:500] = 255
+    open_wall(binary, 260, 50)
     draw_arc(binary, 260, 200, 50, 0, 90)
     state = make_state([wall("W0001", 100, 200, 500, 200)], binary)
     door_detection.run(state)
@@ -132,6 +156,7 @@ def test_split_children_carry_provenance():
 def test_gap_record_created():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255
+    open_wall(binary, 300, 50)
     draw_arc(binary, 300, 200, 50, 0, 90)
     state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
     door_detection.run(state)
@@ -139,3 +164,15 @@ def test_gap_record_created():
     assert len(door_gaps) == 1
     assert door_gaps[0].wall_id == "W0001"
     assert 0 < door_gaps[0].wall_break_score <= 0.4 + 0.05
+
+
+def test_detected_door_exports_ordered_swing_arc():
+    binary = np.zeros((400, 600), np.uint8)
+    binary[196:205, 50:550] = 255
+    open_wall(binary, 300, 50)
+    draw_arc(binary, 300, 200, 50, 0, 90)
+    state = make_state([wall("W0001", 50, 200, 550, 200)], binary)
+    door_detection.run(state)
+    assert len(state.doors) == 1
+    assert len(state.doors[0].swing_arc) >= 12
+    assert state.doors[0].confidence > 0

@@ -163,3 +163,73 @@ This decouples room topology from false dimension walls, closes door/window inte
   because one marginal detection was removed; the structural gain was retained.
 - Output: `debug_output/semantic_refilter_full.{pdf,png}`; metrics:
   `evaluation_output/semantic_refilter_full.json`.
+
+### Door redesign proposal
+
+- Failure: the circle-first stage accepts any partial circular ink near a wall.
+  On the retained plan its nine detections are toilet/sink outlines, window
+  markers, or annotations; the visible door swings are mostly absent. The
+  detector also stores the midpoint of an observed arc as the leaf endpoint,
+  splits the wall only at that point, and the PDF renderer draws a full circle.
+  Consequently the door export contains only 131 coloured pixels versus 7,553
+  reference pixels (IoU 0.0010), even before accounting for localization error.
+- Replacement: keep Hough only as a proposal generator, then require
+  door-specific evidence: a physical leaf-radius range, quarter-arc endpoints
+  aligned parallel/perpendicular to the supporting wall, thick-wall
+  continuation on the hinge side, a structural opening toward the jamb, and
+  radial leaf ink. Retain the observed arc samples as explicit geometry.
+- Export/rendering: serialize hinge, leaf endpoint, and sampled swing arc;
+  render the bounded quarter-swing sector rather than a full circle; and add
+  door/window elements to the frontend annotation adapter so detections are not
+  lost after the CV result stage.
+- Expected effect: fixtures and drafting circles fail the wall-opening test,
+  true swings gain area and boundary overlap, and downstream consumers receive
+  the same door geometry that is evaluated in the PDF output.
+
+### Door redesign retained
+
+- Implementation: Hough is now proposal-only. Candidates must pass a
+  scale-aware circumference check, cardinal endpoint alignment, supporting-wall
+  continuation, low structural support through the opening, and radial leaf
+  support. Accepted doors retain 18 ordered swing-arc samples and a confidence
+  score. The PDF/SVG exporters draw a bounded translucent swing sector, and the
+  frontend adapter now exports both doors and windows.
+- Files: `apps/api/src/vision/cv/{config.py,door_detection.py,models.py,annotate_pdf.py,serialize.py}`,
+  `apps/api/src/vision/adapters/annotation_adapter.py`,
+  `tools/evaluate_annotation.py`, door/renderer/serialization/end-to-end tests,
+  and `PROGRESS.md`.
+- Rejected first attempt: fixed +/-1 px circumference sampling yielded zero
+  real-plan doors. A radius-proportional 2-6 px annulus retained the semantic
+  tests while recovering anti-aliased PDF arcs.
+- Tests/commands: focused door/serialization/renderer tests; updated synthetic
+  end-to-end plan with a real wall opening and radial leaf; full suite 140
+  passed. Cached stage-6 comparison produced 9 doors. The authoritative raw
+  CLI run completed in 366.2 s with 148 walls, 12 doors, 37 windows, 8/8
+  labeled rooms, and 49 gaps.
+- Retained result: door IoU 0.0010 -> 0.1059; door F1 0.0021 -> 0.1916;
+  door recall 0.0011 -> 0.3119; foreground IoU 0.5326 -> 0.5623; macro IoU
+  0.1648 -> 0.1880. Wall IoU moved 0.1135 -> 0.1112 and room IoU 0.5071 ->
+  0.4934 because filled door sectors replace overlapping wall/room pixels in
+  the mutually exclusive evaluator; the substantially larger door and overall
+  gains justify retention.
+- Output: `debug_output/door_semantic_full.{pdf,png}`; metrics:
+  `evaluation_output/door_semantic_full.json`.
+
+## Current result after the redesigns
+
+| Metric | Original baseline | Current | Change |
+|---|---:|---:|---:|
+| Macro IoU | 0.0309 | 0.1880 | +0.1571 |
+| Foreground IoU | 0.0833 | 0.5623 | +0.4790 |
+| Wall IoU | 0.0634 | 0.1112 | +0.0478 |
+| Door IoU | 0.0000 | 0.1059 | +0.1059 |
+| Window IoU | 0.0311 | 0.0415 | +0.0104 |
+| Room IoU | 0.0291 | 0.4934 | +0.4643 |
+
+Remaining limitations: the raster reference has no object IDs and its
+connected-component object counts fragment anti-aliased overlays. One detected
+double-leaf/closet swing remains outside the reference door class, and several
+nearby central doors overlap. Separating those cases reliably requires door
+type/schedule semantics or labeled examples rather than a plan-specific tag
+rule. Window localization and wall recall remain materially below the room and
+door gains.

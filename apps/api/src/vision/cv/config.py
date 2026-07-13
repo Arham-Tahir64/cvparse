@@ -103,17 +103,24 @@ class PipelineConfig:
     zero_length_wall_px: float = 2.0           # walls shorter than this are removed
 
     # --- Module 07: Doors ---
-    door_arc_min_radius_px: float = 20.0
+    # At 1/4" = 1'-0" and 200 DPI, scheduled 2'-4" to 3'-0" leaves are
+    # roughly 117-150 px. A lower bound of 65 still allows smaller scales and
+    # rejects the many 20-40 px fixture/tag circles on architectural sheets.
+    door_arc_min_radius_px: float = 65.0
     # At 1/4" = 1'-0" and 200 DPI a common 2'-6" leaf is ~125 px.
     door_arc_max_radius_px: float = 160.0
-    door_wall_snap_px: float = 15.0
+    door_wall_snap_px: float = 30.0
     hough_circles_dp: float = 1.0
     hough_circles_min_dist: float = 30.0
     hough_circles_param1: float = 100.0        # Canny upper threshold
-    hough_circles_param2: float = 25.0         # accumulator threshold; tune 20-50
+    hough_circles_param2: float = 18.0         # proposals; semantic checks reject clutter
     arc_coverage_min: float = 0.15
     arc_coverage_max: float = 0.40
-    door_dedup_dist_px: float = 10.0           # hinge distance for deduplication
+    door_dedup_dist_px: float = 24.0           # hinge distance for deduplication
+    door_axis_angle_tol_deg: float = 35.0
+    door_min_wall_continuation: float = 0.35
+    door_max_opening_support: float = 0.42
+    door_min_leaf_support: float = 0.18
     door_split_t_min: float = 0.1              # split only if hinge parameter in (min, max)
     door_split_t_max: float = 0.9
     wall_erase_extra_px: int = 4               # extra thickness when erasing walls

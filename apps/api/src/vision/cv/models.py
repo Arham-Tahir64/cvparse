@@ -159,6 +159,11 @@ class Door:
     wall_id: str
     swing_direction: Literal["cw", "ccw"]
     opens_into_room_id: Optional[str] = None
+    # Ordered samples of the detected quarter-circle from one wall/leaf
+    # endpoint to the other. Keeping this geometry avoids reconstructing a
+    # fictitious full circle in exporters.
+    swing_arc: list[Point] = field(default_factory=list)
+    confidence: float = 0.0
 
 
 @dataclass(slots=True)
