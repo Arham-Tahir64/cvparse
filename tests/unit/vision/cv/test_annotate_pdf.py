@@ -110,6 +110,28 @@ def test_reconstructed_wall_mask_renders_as_filled_region():
     assert np.all(rendered[15, 15] > 245)
 
 
+def test_semantic_masks_preserve_door_and_window_ownership():
+    image = np.full((300, 300), 255, np.uint8)
+    door_mask = np.zeros(image.shape, np.uint8)
+    window_mask = np.zeros(image.shape, np.uint8)
+    door_mask[150:230, 80:180] = 255
+    window_mask[185:205, 140:250] = 255
+    from vision.cv.models import CVTakeoffResult
+
+    out = annotate_image_as_pdf(
+        image, CVTakeoffResult(), dpi=72,
+        door_mask=door_mask, window_mask=window_mask,
+    )
+    doc = fitz.open(stream=out, filetype="pdf")
+    pix = doc[0].get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    rendered = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
+    doc.close()
+
+    # Door-only pixels are green; the later window mask owns their overlap.
+    assert int(rendered[165, 100, 1]) - int(rendered[165, 100, 0]) >= 100
+    assert rendered[195, 160, 2] > rendered[195, 160, 1]
+
+
 def test_skip_stage_records_message():
     state = pipeline.run_pipeline_state(
         image=synthetic_plan(),

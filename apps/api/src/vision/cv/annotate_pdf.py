@@ -58,6 +58,8 @@ def annotate_pdf_page(
     roi_mask: Optional[np.ndarray] = None,
     junctions: Optional[list] = None,
     wall_mask: Optional[np.ndarray] = None,
+    door_mask: Optional[np.ndarray] = None,
+    window_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Overlay detections on the original PDF page; returns single-page PDF bytes."""
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -68,6 +70,7 @@ def annotate_pdf_page(
     _draw(
         page, result, scale=72.0 / dpi, roi_mask=roi_mask,
         junctions=junctions, wall_mask=wall_mask,
+        door_mask=door_mask, window_mask=window_mask,
     )
     out = doc.tobytes()
     doc.close()
@@ -81,6 +84,8 @@ def annotate_image_as_pdf(
     roi_mask: Optional[np.ndarray] = None,
     junctions: Optional[list] = None,
     wall_mask: Optional[np.ndarray] = None,
+    door_mask: Optional[np.ndarray] = None,
+    window_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Create a PDF page from a raster image and overlay detections."""
     h, w = image.shape[:2]
@@ -93,6 +98,7 @@ def annotate_image_as_pdf(
     _draw(
         page, result, scale=scale, roi_mask=roi_mask,
         junctions=junctions, wall_mask=wall_mask,
+        door_mask=door_mask, window_mask=window_mask,
     )
     out = doc.tobytes()
     doc.close()
@@ -102,6 +108,8 @@ def annotate_image_as_pdf(
 def _draw(
     page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None,
     wall_mask: Optional[np.ndarray] = None,
+    door_mask: Optional[np.ndarray] = None,
+    window_mask: Optional[np.ndarray] = None,
 ) -> None:
     shape = page.new_shape()
 
@@ -182,10 +190,21 @@ def _draw(
 
     # Doors: bounded swing sector, leaf, and hinge. The detector exports the
     # observed quarter arc; never invent a full circle around the hinge.
+    if door_mask is not None:
+        shape.commit()
+        door_owned = door_mask
+        if window_mask is not None and window_mask.shape == door_mask.shape:
+            door_owned = door_mask.copy()
+            door_owned[window_mask > 0] = 0
+        # The class mask owns the complete sector. An opaque semantic fill is
+        # unambiguous even where the door overlaps a translucent room overlay;
+        # leaf and hinge vectors are retained on top for geometric readability.
+        _insert_semantic_mask(page, door_owned, COLORS["door"], 1.0)
+        shape = page.new_shape()
     for door in result.doors:
         hinge = pt(door.position.x, door.position.y)
         swing = pt(door.swing_end.x, door.swing_end.y)
-        if len(door.swing_arc) >= 2:
+        if door_mask is None and len(door.swing_arc) >= 2:
             arc = [pt(point.x, point.y) for point in door.swing_arc]
             shape.draw_polyline([hinge] + arc + [hinge])
             shape.finish(
@@ -199,32 +218,40 @@ def _draw(
 
     # Windows own a filled span within their supporting wall and draw after the
     # wall footprint, keeping the classes visually and semantically separate.
+    if window_mask is not None:
+        shape.commit()
+        _insert_semantic_mask(page, window_mask, COLORS["window"], 0.65)
+        shape = page.new_shape()
     wall_lookup = {wall.id: wall for wall in result.walls}
     for wall in result.walls:
         for source_id in wall.source_ids:
             wall_lookup.setdefault(source_id, wall)
-    for window in result.windows:
-        wall = wall_lookup.get(window.wall_id)
-        if wall is None:
-            continue
-        cl = wall.centerline
-        length = max(1e-6, cl.length)
-        ux, uy = (cl.end.x - cl.start.x) / length, (cl.end.y - cl.start.y) / length
-        nx, ny = -uy, ux
-        along = window.width / 2.0
-        across = max(wall.thickness, wall.visual_thickness) / 2.0
-        cx, cy = window.position.x, window.position.y
-        points = [
-            pt(cx - ux * along + nx * across, cy - uy * along + ny * across),
-            pt(cx + ux * along + nx * across, cy + uy * along + ny * across),
-            pt(cx + ux * along - nx * across, cy + uy * along - ny * across),
-            pt(cx - ux * along - nx * across, cy - uy * along - ny * across),
-        ]
-        shape.draw_polyline(points + [points[0]])
-        shape.finish(
-            color=COLORS["window"], fill=COLORS["window"], width=0.3,
-            stroke_opacity=0.9, fill_opacity=0.65, closePath=True,
-        )
+    if window_mask is None:
+        for window in result.windows:
+            wall = wall_lookup.get(window.wall_id)
+            if wall is None:
+                continue
+            cl = wall.centerline
+            length = max(1e-6, cl.length)
+            ux, uy = (
+                (cl.end.x - cl.start.x) / length,
+                (cl.end.y - cl.start.y) / length,
+            )
+            nx, ny = -uy, ux
+            along = window.width / 2.0
+            across = max(wall.thickness, wall.visual_thickness) / 2.0
+            cx, cy = window.position.x, window.position.y
+            points = [
+                pt(cx - ux * along + nx * across, cy - uy * along + ny * across),
+                pt(cx + ux * along + nx * across, cy + uy * along + ny * across),
+                pt(cx + ux * along - nx * across, cy + uy * along - ny * across),
+                pt(cx - ux * along - nx * across, cy - uy * along - ny * across),
+            ]
+            shape.draw_polyline(points + [points[0]])
+            shape.finish(
+                color=COLORS["window"], fill=COLORS["window"], width=0.3,
+                stroke_opacity=0.9, fill_opacity=0.65, closePath=True,
+            )
 
     shape.commit()
 
@@ -244,16 +271,26 @@ def _draw(
 
 def _insert_wall_mask(page, wall_mask: np.ndarray) -> None:
     """Insert a full-page RGBA wall region while preserving mask holes."""
-    mask = np.where(wall_mask > 0, 217, 0).astype(np.uint8)  # 0.85 opacity
-    rgba = np.zeros((*wall_mask.shape[:2], 4), np.uint8)
-    red, green, blue = (round(channel * 255) for channel in COLORS["wall"])
+    _insert_semantic_mask(page, wall_mask, COLORS["wall"], 0.85)
+
+
+def _insert_semantic_mask(
+    page, semantic_mask: np.ndarray, colour: tuple[float, float, float],
+    opacity: float,
+) -> None:
+    """Insert an exact class raster so PDF export preserves mask ownership."""
+    mask = np.where(
+        semantic_mask > 0, round(255 * opacity), 0,
+    ).astype(np.uint8)
+    rgba = np.zeros((*semantic_mask.shape[:2], 4), np.uint8)
+    red, green, blue = (round(channel * 255) for channel in colour)
     rgba[..., 0] = blue
     rgba[..., 1] = green
     rgba[..., 2] = red
     rgba[..., 3] = mask
     ok, encoded = cv2.imencode(".png", rgba)
     if not ok:
-        logger.warning("could not encode reconstructed wall mask")
+        logger.warning("could not encode semantic mask")
         return
     page.insert_image(
         page.rect, stream=encoded.tobytes(), overlay=True, keep_proportion=False,

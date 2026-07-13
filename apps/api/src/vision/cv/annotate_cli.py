@@ -99,12 +99,14 @@ def main(argv=None) -> int:
             file_bytes, result, dpi=args.dpi, page_number=args.page,
             roi_mask=state.structural_roi_mask, junctions=state.junctions,
             wall_mask=state.wall_mask,
+            door_mask=state.door_mask, window_mask=state.window_mask,
         )
     else:
         annotated = annotate_image_as_pdf(
             state.image, result, dpi=args.dpi,
             roi_mask=state.structural_roi_mask, junctions=state.junctions,
             wall_mask=state.wall_mask,
+            door_mask=state.door_mask, window_mask=state.window_mask,
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

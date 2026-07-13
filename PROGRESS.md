@@ -775,3 +775,42 @@ Proposed coupled change:
   Inspect PDF/preview draw order and semantic ownership so overlapping door,
   window, wall, and room classes are exported consistently with the reference,
   without changing detector masks or either highlighted structural result.
+
+### Cycle 4 retained: export exact, exclusive door/window masks
+
+- Root cause: semantic-mask reconstruction produced the masks used for direct
+  evaluation and wall cut-outs, but PDF export discarded the door/window
+  rasters and independently rebuilt approximate vector bands and sectors.
+  Translucent class overlays also compounded over room fills, making ownership
+  ambiguous even when the underlying masks were exclusive.
+- PDF and image annotation APIs now accept the final door/window masks. The
+  renderer inserts those masks at native plan resolution, retains vector door
+  hinges/leaves for readability, and uses window-last exclusivity by clearing
+  window-owned pixels from the door raster before export. The previous vector
+  path remains the fallback when masks are unavailable.
+- Rejected variant: exact masks with the old 0.24 door-sector opacity improved
+  macro IoU only to 0.4406 (door 0.1563, window 0.1923). Opaque semantic door
+  ownership improved both classes further without changing geometry: door
+  0.1707 and window 0.1983.
+- Full rendered results versus Cycle 3: wall IoU 0.6386 -> 0.6385, door IoU
+  0.1529 -> 0.1707, window IoU 0.1868 -> 0.1983, room IoU 0.7752 -> 0.7756,
+  macro IoU 0.4384 -> 0.4458, foreground IoU 0.8528 -> 0.8548. The 0.0001
+  wall change is raster antialiasing (2 pixels); structural masks and detector
+  counts are identical.
+- Both registered cases remain exact: recreation room wall IoU 0.7169, room
+  IoU 0.9158, barriers 0 vertical / 2 horizontal; missing-wall crop wall IoU
+  0.4528, boundary F1 0.7394, room IoU 0.6593.
+- Tests: 162 passed, including an overlap-ownership renderer regression test.
+  Full uncached run: 371.7 s, 116 walls, 9 doors, 7 windows, 8/8 rooms, 16
+  gaps. Output: `debug_output/highlight_cycle4_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle4_full.json`; intermediates:
+  `debug_output/highlight_cycle4_full_intermediates/`; seven-layer crops:
+  `debug_output/focus_cycle4_full/`.
+
+### Cycle 5 goal: reduce remaining door-sector geometry error
+
+- Door remains the lowest-overlap class at IoU 0.1707 despite 9 plausible
+  detections. Audit each sector against the reference to distinguish hinge,
+  radius, quadrant, and duplicate-sector errors. Retain only a geometrically
+  explainable correction that raises door IoU without reducing wall, window,
+  room, or either highlighted-region metric.
