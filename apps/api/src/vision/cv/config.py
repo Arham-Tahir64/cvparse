@@ -115,6 +115,12 @@ class PipelineConfig:
     # lower quantile, then allow modest variation above it.
     wall_region_interior_width_quantile: float = 0.40
     wall_region_interior_width_scale: float = 1.15
+    # A structural interior wall should bound at least one inferred free-space
+    # region. This contextual veto is enabled only when enough room evidence is
+    # available; sparse/unlabeled plans keep the geometry-only fallback.
+    wall_region_room_support_min_rooms: int = 2
+    wall_region_room_support_radius_px: int = 20
+    wall_region_room_support_min_overlap: float = 0.20
     exterior_wall_min_side_support: float = 0.45
     exterior_wall_min_rectangularity: float = 0.85
 

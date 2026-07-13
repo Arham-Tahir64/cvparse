@@ -249,6 +249,7 @@ class PipelineState:
     # Explicit semantic masks produced after detection for inspection/export.
     wall_boundary_mask: Optional[np.ndarray] = None
     wall_polygon_mask: Optional[np.ndarray] = None
+    rejected_wall_candidate_mask: Optional[np.ndarray] = None
     wall_repaired_mask: Optional[np.ndarray] = None
     wall_mask: Optional[np.ndarray] = None
     door_mask: Optional[np.ndarray] = None

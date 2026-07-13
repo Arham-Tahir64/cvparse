@@ -35,6 +35,7 @@ def run(state: PipelineState) -> PipelineState:
     shape = state.image.shape[:2]
     wall_boundaries = np.zeros(shape, np.uint8)
     wall_polygons = np.zeros(shape, np.uint8)
+    rejected_wall_candidates = np.zeros(shape, np.uint8)
     door_mask = np.zeros(shape, np.uint8)
     window_mask = np.zeros(shape, np.uint8)
     room_mask = np.zeros(shape, np.uint8)
@@ -46,13 +47,25 @@ def run(state: PipelineState) -> PipelineState:
         cv2.fillPoly(room_mask, polygon, 255)
 
     interior_width_limit = _interior_wall_thickness_limit(state)
+    room_support = _room_boundary_support(state, room_mask)
+    accepted_walls = 0
+    rejected_walls = 0
     line_lookup = {line.id: line for line in state.classified_lines}
     for wall in state.walls:
         if state.config.manhattan and wall.orientation == "diagonal":
             continue
+        candidate = np.zeros(shape, np.uint8)
         _draw_wall_band(
-            wall_polygons, wall, 255, thickness_limit=interior_width_limit,
+            candidate, wall, 255, thickness_limit=interior_width_limit,
         )
+        if _candidate_has_room_support(candidate, room_support, state):
+            wall_polygons = cv2.bitwise_or(wall_polygons, candidate)
+            accepted_walls += 1
+        else:
+            rejected_wall_candidates = cv2.bitwise_or(
+                rejected_wall_candidates, candidate,
+            )
+            rejected_walls += 1
         sources = [line_lookup[source_id] for source_id in wall.source_ids
                    if source_id in line_lookup]
         if sources:
@@ -135,8 +148,19 @@ def run(state: PipelineState) -> PipelineState:
     combined[door_mask > 0] = CLASS_COLORS["door"]
     combined[window_mask > 0] = CLASS_COLORS["window"]
 
+    if state.interior_drafting_mask is not None:
+        rejected_interior = rejected_wall_candidates
+        if state.semantic_plan_mask is not None:
+            rejected_interior = cv2.bitwise_and(
+                rejected_interior, state.semantic_plan_mask,
+            )
+        state.interior_drafting_mask = cv2.bitwise_or(
+            state.interior_drafting_mask, rejected_interior,
+        )
+
     state.wall_boundary_mask = wall_boundaries
     state.wall_polygon_mask = wall_polygons
+    state.rejected_wall_candidate_mask = rejected_wall_candidates
     state.wall_repaired_mask = wall_mask
     state.wall_mask = wall_mask
     state.door_mask = door_mask
@@ -147,6 +171,8 @@ def run(state: PipelineState) -> PipelineState:
     state.debug.segment_counts["13_interior_width_limit_px"] = int(
         round(interior_width_limit)
     )
+    state.debug.segment_counts["13_supported_walls"] = accepted_walls
+    state.debug.segment_counts["13_rejected_wall_candidates"] = rejected_walls
     state.debug.segment_counts["13_window_pixels"] = int(np.count_nonzero(window_mask))
 
     if state.config.debug_visualize and state.config.debug_output_dir:
@@ -154,6 +180,10 @@ def run(state: PipelineState) -> PipelineState:
         os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(os.path.join(out_dir, "wall_boundaries.png"), wall_boundaries)
         cv2.imwrite(os.path.join(out_dir, "wall_polygons.png"), wall_polygons)
+        cv2.imwrite(
+            os.path.join(out_dir, "rejected_wall_candidates.png"),
+            rejected_wall_candidates,
+        )
         if state.interior_drafting_mask is not None:
             cv2.imwrite(
                 os.path.join(out_dir, "interior_drafting_mask.png"),
@@ -217,6 +247,42 @@ def _interior_wall_thickness_limit(state: PipelineState) -> float:
             estimate * float(config.wall_region_interior_width_scale),
         ),
     )
+
+
+def _room_boundary_support(
+    state: PipelineState, room_mask: np.ndarray,
+) -> np.ndarray | None:
+    """Return a tolerance band around inferred free-space boundaries."""
+    config = state.config
+    if len(state.rooms) < config.wall_region_room_support_min_rooms:
+        return None
+    boundary = cv2.morphologyEx(
+        room_mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8),
+    )
+    if not np.any(boundary):
+        return None
+    radius = max(0, int(config.wall_region_room_support_radius_px))
+    if radius:
+        boundary = cv2.dilate(
+            boundary,
+            np.ones((2 * radius + 1, 2 * radius + 1), np.uint8),
+        )
+    return boundary
+
+
+def _candidate_has_room_support(
+    candidate: np.ndarray, room_support: np.ndarray | None,
+    state: PipelineState,
+) -> bool:
+    if room_support is None:
+        return True
+    area = int(np.count_nonzero(candidate))
+    if area < 1:
+        return False
+    supported = int(np.count_nonzero(
+        cv2.bitwise_and(candidate, room_support)
+    ))
+    return supported / area >= state.config.wall_region_room_support_min_overlap
 
 
 def _exterior_wall_ring(

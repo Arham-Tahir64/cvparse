@@ -101,6 +101,35 @@ def test_interior_width_uses_lower_consistent_face_pair_mode():
     assert state.wall_polygon_mask[230, 250] == 255
 
 
+def test_room_boundary_support_keeps_thin_partition_and_rejects_floating_rule():
+    state = PipelineState(config=PipelineConfig(
+        wall_region_room_support_min_rooms=2,
+        wall_region_room_support_radius_px=6,
+        wall_region_room_support_min_overlap=0.20,
+    ))
+    state.image = np.full((300, 500), 255, np.uint8)
+    state.rooms = [
+        Room("R1", [Point(30, 30), Point(220, 30), Point(220, 270), Point(30, 270)],
+             area=45600),
+        Room("R2", [Point(240, 30), Point(470, 30), Point(470, 270), Point(240, 270)],
+             area=55200),
+    ]
+    # Thin structural partition follows both room boundaries. The parallel
+    # floating rule crosses room interiors and has no free-space boundary role.
+    state.walls = [
+        wall("PARTITION", 230, 30, 230, 270, 6),
+        wall("FLOATING", 70, 150, 190, 150, 6),
+    ]
+
+    semantic_masks.run(state)
+
+    assert state.wall_polygon_mask[150, 230] == 255
+    assert state.wall_polygon_mask[150, 130] == 0
+    assert state.rejected_wall_candidate_mask[150, 130] == 255
+    assert state.debug.segment_counts["13_supported_walls"] == 1
+    assert state.debug.segment_counts["13_rejected_wall_candidates"] == 1
+
+
 def test_exterior_ring_uses_room_inner_face_and_supported_shell_thickness():
     state = PipelineState(config=PipelineConfig(
         wall_thickness_max_px=50,

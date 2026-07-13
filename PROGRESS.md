@@ -545,3 +545,52 @@ does not use global dilation or any coordinate from the reference annotation.
   mechanical-room leaders, and a few unknown parallel clean-pass pairs. The
   next iteration will test whether inferred room-boundary participation can
   reject these floating rules without discarding legitimate thin partitions.
+
+### Room-boundary wall support retained
+
+- The semantic stage now builds a tolerance band around inferred room
+  boundaries and requires wall candidates to participate in that band. This
+  is deliberately a post-detection semantic veto: door, window, room, and wall
+  object proposals remain available, while floating parallel measurement
+  rules no longer automatically enter the exported wall pixels.
+- The veto activates only with at least two inferred rooms. Plans with sparse
+  or no room evidence retain the geometry-only wall fallback. A focused test
+  verifies that a legitimate 6 px partition adjoining two rooms survives and
+  a same-width floating rule crossing room interiors is rejected.
+- Rejected geometry is exported as `rejected_wall_candidates.png` and unioned
+  into the semantic-stage `interior_drafting_mask.png`. The full run rejected
+  61 of 122 non-diagonal wall candidates (183,407 native pixels); the updated
+  interior drafting mask contains 616,383 pixels.
+- Sensitivity check: nine combinations spanning 15--25 px boundary tolerance
+  and 0.15--0.25 overlap all improved precision relative to no contextual
+  veto. The default 20 px/0.20 setting was retained as the scale-consistent,
+  moderate choice; the reference-best direct-mask setting removed nine more
+  candidates for only +0.0033 direct IoU and was not adopted as a
+  reference-specific optimization.
+- Tests: 154 passed. Complete raw run with PaddleOCR: 387.8 s, 124 walls, 4
+  doors, 7 windows, 8/8 labeled rooms, and 11 gaps. Output:
+  `debug_output/room_supported_full.{pdf,png}`; metrics:
+  `evaluation_output/room_supported_full.json`; intermediates:
+  `debug_output/room_supported_full_intermediates/`.
+
+| Metric | Local-width full | Room-supported full | Change |
+|---|---:|---:|---:|
+| Wall precision | 0.7272 | 0.8034 | +0.0762 |
+| Wall recall | 0.7815 | 0.7369 | -0.0446 |
+| Wall F1 | 0.7534 | 0.7687 | +0.0153 |
+| Wall IoU | 0.6043 | 0.6243 | +0.0200 |
+| Wall boundary F1 | 0.5727 | 0.5652 | -0.0075 |
+| Door IoU | 0.1372 | 0.1373 | +0.0001 |
+| Window IoU | 0.2046 | 0.2048 | +0.0002 |
+| Room IoU | 0.5546 | 0.5548 | +0.0002 |
+| Macro IoU | 0.3752 | 0.3803 | +0.0051 |
+| Foreground IoU | 0.6732 | 0.6536 | -0.0196 |
+
+- Visual audit: long false horizontal dimension walls through storage, the
+  stair/circulation zone, and the mechanical room are removed. The complete
+  exterior ring, labeled room fills, door sectors, window spans, and narrow
+  partitions bordering detected rooms remain. Residual differences are now
+  dominated by room coverage (unlabeled stair/circulation void), missed door
+  swings, and short fragmented interior wall ends rather than broad wall
+  over-expansion. Fixing those reliably requires either broader free-space
+  seeding/training data or a different learned door/room segmentation model.
