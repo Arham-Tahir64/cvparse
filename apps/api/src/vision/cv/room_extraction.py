@@ -26,12 +26,21 @@ def run(state: PipelineState) -> PipelineState:
     image_area = float(state.image.shape[0] * state.image.shape[1])
     id_gen = IdGenerator("R")
 
-    rooms: list[Room] = []
-    planar_ok = False
-    try:
-        rooms, planar_ok = _planar_graph_rooms(state, image_area, id_gen)
-    except Exception:
-        logger.exception("planar graph path failed; falling back to flood fill")
+    rooms = _semantic_raster_rooms(state, image_area, id_gen)
+    if len(rooms) >= config.semantic_room_min_seeds:
+        state.debug.messages.append(
+            f"semantic raster path selected with {len(rooms)} seeded rooms"
+        )
+        planar_ok = True
+    else:
+        rooms = []
+        planar_ok = False
+
+    if not rooms:
+        try:
+            rooms, planar_ok = _planar_graph_rooms(state, image_area, id_gen)
+        except Exception:
+            logger.exception("planar graph path failed; falling back to flood fill")
 
     if (not planar_ok or not rooms) and config.enable_floodfill_fallback:
         logger.info("using flood-fill fallback (planar_ok=%s, rooms=%d)",
@@ -52,6 +61,135 @@ def run(state: PipelineState) -> PipelineState:
             visualize(state, state.image),
         )
     return state
+
+
+# ---------------------------------------------------------------------------
+# Primary path - semantic seeds + directional raster barriers
+# ---------------------------------------------------------------------------
+
+_ROOM_LABEL_ALIASES = {
+    "LNDRY": "LAUNDRY",
+    "REC ROOM AREA": "REC ROOM AREA",
+    "MECHANICAL": "MECHANICAL",
+}
+
+
+def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
+    """Extract rooms as free-space components containing room-label OCR.
+
+    Directional opening suppresses text and short symbols. Closing only along
+    each line's own axis bridges doors, windows, and fragmented wall faces
+    without globally filling room interiors. The structural-core bounds keep
+    schedules and title blocks out, while OCR labels select architectural
+    regions from the remaining free-space components.
+    """
+    config = state.config
+    binary = state.binary_masked if state.binary_masked is not None else state.binary
+    core = state.structural_core_mask
+    if binary is None or core is None or not state.raw_texts:
+        return []
+
+    seeds = _room_label_seeds(state)
+    if len(seeds) < config.semantic_room_min_seeds:
+        return []
+
+    line_px = max(3, int(config.room_barrier_min_line_px))
+    close_px = max(line_px, int(config.room_barrier_gap_close_px))
+    thickness = max(1, int(config.room_barrier_thickness_px))
+
+    horizontal = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, np.ones((1, line_px), np.uint8)
+    )
+    vertical = cv2.morphologyEx(
+        binary, cv2.MORPH_OPEN, np.ones((line_px, 1), np.uint8)
+    )
+    horizontal = cv2.morphologyEx(
+        horizontal, cv2.MORPH_CLOSE, np.ones((1, close_px), np.uint8)
+    )
+    vertical = cv2.morphologyEx(
+        vertical, cv2.MORPH_CLOSE, np.ones((close_px, 1), np.uint8)
+    )
+    horizontal = cv2.dilate(horizontal, np.ones((thickness, 1), np.uint8))
+    vertical = cv2.dilate(vertical, np.ones((1, thickness), np.uint8))
+    barrier = cv2.bitwise_or(horizontal, vertical)
+
+    x, y, w, h = cv2.boundingRect((core > 0).astype(np.uint8))
+    if w < 3 or h < 3:
+        return []
+    crop = barrier[y:y + h, x:x + w].copy()
+    border = max(3, thickness * 2)
+    cv2.rectangle(crop, (0, 0), (w - 1, h - 1), 255, border)
+
+    free = (crop == 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(free, 4)
+    if count <= 1:
+        return []
+
+    by_component: dict[int, tuple[str, float]] = {}
+    for label, confidence, sx, sy in seeds:
+        cx, cy = sx - x, sy - y
+        if not (0 <= cx < w and 0 <= cy < h):
+            continue
+        component_id = int(labels[cy, cx])
+        if component_id == 0:
+            continue
+        area = int(stats[component_id, cv2.CC_STAT_AREA])
+        if area < config.min_room_area_px:
+            continue
+        if area > config.max_room_area_frac * float(w * h):
+            continue
+        previous = by_component.get(component_id)
+        if previous is None or confidence > previous[1]:
+            by_component[component_id] = (label, confidence)
+
+    rooms: list[Room] = []
+    for component_id, (label, confidence) in by_component.items():
+        component = (labels == component_id).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(
+            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        epsilon = config.semantic_room_poly_epsilon_frac * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        polygon = [
+            Point(float(point[0][0] + x), float(point[0][1] + y))
+            for point in approx
+        ]
+        if len(polygon) < 3:
+            continue
+        rooms.append(Room(
+            id=id_gen(), polygon=polygon,
+            area=float(stats[component_id, cv2.CC_STAT_AREA]),
+            label=label, label_confidence=confidence,
+        ))
+
+    logger.info("semantic raster extraction found %d rooms from %d seeds",
+                len(rooms), len(seeds))
+    return rooms
+
+
+def _room_label_seeds(state) -> list[tuple[str, float, int, int]]:
+    config = state.config
+    vocab = sorted(config.room_label_vocab, key=len, reverse=True)
+    core = state.structural_core_mask
+    seeds = []
+    for text in state.raw_texts:
+        if text.confidence < config.semantic_room_seed_confidence:
+            continue
+        normalized = " ".join(text.text.upper().replace("/", "/").split())
+        match = next((entry for entry in vocab if entry in normalized), None)
+        if match is None:
+            continue
+        cx, cy = int(round(text.center.x)), int(round(text.center.y))
+        if not (0 <= cy < core.shape[0] and 0 <= cx < core.shape[1]):
+            continue
+        if core[cy, cx] == 0:
+            continue
+        label = _ROOM_LABEL_ALIASES.get(match, normalized)
+        seeds.append((label, float(text.confidence), cx, cy))
+    return seeds
 
 
 # ---------------------------------------------------------------------------

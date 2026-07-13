@@ -109,3 +109,34 @@
 
 - The supplied ground truth is a raster overlay, not vector/object annotations. Connected components are therefore only an object-count proxy, especially for the connected wall network.
 - The reference supplies room-class regions but no machine-readable polygons or object IDs; semantic pixel metrics are authoritative, while object matching is approximate.
+
+## Architectural redesign (2026-07-13)
+
+### Why the graph architecture fails
+
+- Room extraction consumes wall centerlines after drafting-line leakage and greedy face pairing. On the real plan this yields 175 fragmented walls, including exterior dimensions, but omits enough true wall continuity that only one planar face exists.
+- The existing fallback rasterizes those same corrupted centerlines, so it finds zero enclosed regions. Closing this mask globally is unstable: small kernels leave rooms open and large kernels manufacture faces from symbols.
+- OCR already recognizes eight high-confidence room labels inside the structural core, but stage 09 ignores them and stage 10 can only label rooms that stage 09 has already found.
+
+### Proposed replacement
+
+1. Treat high-confidence room-label OCR inside the structural core as semantic seeds.
+2. Extract long horizontal and vertical ink runs directly from the masked binary, independently of the corrupted wall graph.
+3. Close each orientation along its axis at opening scale, then thicken it across the axis to form structural barriers while suppressing text and short symbols.
+4. Label free-space components inside the structural-core bounds and retain the component containing each semantic seed as a room polygon.
+5. Use the existing planar/flood paths when fewer than two reliable semantic seeds exist.
+
+This decouples room topology from false dimension walls, closes door/window interruptions without filling room interiors, exports labeled polygons through the existing result renderer/adapter, and creates semantic regions that can later constrain wall and door validation.
+
+### Prototype evidence
+
+- Eight separated labeled rooms: Guest, Bath, Gym, Laundry, Linen, Storage, Mechanical, and Rec Room.
+- Room IoU 0.0296 -> 0.5054; room F1 0.0575 -> 0.6715; room boundary F1 0.3719 -> 0.4275.
+- Foreground IoU 0.1109 -> 0.5215; macro IoU 0.0455 -> 0.1632.
+- Full implementation retained. The raw-input run completed in 362.2 s with
+  181 walls, 10 doors, 53 windows, 8/8 labeled rooms, and 63 gaps.
+- Full suite: 135 passed. Export verified in
+  `debug_output/semantic_rooms_full.{pdf,png}`; metrics in
+  `evaluation_output/semantic_rooms_full.json`.
+- Final room IoU 0.5050, room F1 0.6711, room boundary F1 0.4274;
+  foreground IoU 0.5214 and macro IoU 0.1630.

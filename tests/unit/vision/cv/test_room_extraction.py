@@ -5,7 +5,8 @@ import pytest
 from vision.cv import junction_snapping, room_extraction
 from vision.cv.config import PipelineConfig
 from vision.cv.models import (
-    Junction, LineSegment, NoRoomsExtractedError, PipelineState, Point, Wall,
+    Junction, LineSegment, NoRoomsExtractedError, PipelineState, Point,
+    TextElement, Wall,
 )
 
 
@@ -152,3 +153,31 @@ def test_polygon_first_vertex_not_repeated():
     room_extraction.run(state)
     poly = state.rooms[0].polygon
     assert poly[0].distance_to(poly[-1]) > 1.0
+
+
+def test_semantic_raster_rooms_bridge_openings_and_keep_labels():
+    state = PipelineState(config=PipelineConfig(
+        room_barrier_min_line_px=12,
+        room_barrier_gap_close_px=35,
+        room_barrier_thickness_px=5,
+    ))
+    state.image = np.full((300, 500), 255, np.uint8)
+    state.binary = np.zeros((300, 500), np.uint8)
+    # Outer enclosure and a partition with a door-sized interruption.
+    cv2 = __import__("cv2")
+    cv2.rectangle(state.binary, (40, 40), (460, 260), 255, 6)
+    cv2.line(state.binary, (250, 40), (250, 130), 255, 6)
+    cv2.line(state.binary, (250, 160), (250, 260), 255, 6)
+    state.binary_masked = state.binary.copy()
+    state.structural_core_mask = np.zeros_like(state.binary)
+    state.structural_core_mask[25:276, 25:476] = 255
+    state.raw_texts = [
+        TextElement("GUEST SUITE", (100, 130, 180, 150), 0.95),
+        TextElement("BATH", (330, 130, 380, 150), 0.93),
+    ]
+
+    room_extraction.run(state)
+
+    assert len(state.rooms) == 2
+    assert {room.label for room in state.rooms} == {"GUEST SUITE", "BATH"}
+    assert all(len(room.polygon) >= 4 for room in state.rooms)

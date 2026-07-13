@@ -12,7 +12,9 @@ DEFAULT_ROOM_LABEL_VOCAB: tuple[str, ...] = (
     "DINING", "FAMILY", "OFFICE", "DEN", "STUDY", "LAUNDRY", "MUDROOM",
     "FOYER", "ENTRY", "HALL", "HALLWAY", "CLOSET", "WIC", "PANTRY",
     "GARAGE", "STAIRS", "STAIR", "POWDER", "STORAGE", "MECHANICAL",
-    "MECH", "PRIMARY", "MASTER BEDROOM", "MASTER",
+    "MECH", "PRIMARY", "MASTER BEDROOM", "MASTER", "GUEST SUITE",
+    "GUEST", "GYM/YOGA", "GYM", "YOGA", "REC ROOM AREA", "REC ROOM",
+    "RECREATION", "LINEN", "LNDRY",
 )
 
 
@@ -134,6 +136,12 @@ class PipelineConfig:
     floodfill_wall_dilation_px: int = 4
     planarity_repair_max_iterations: int = 20
     room_poly_epsilon_frac: float = 0.01       # approxPolyDP epsilon / contour perimeter
+    semantic_room_min_seeds: int = 2
+    room_barrier_min_line_px: int = 30
+    room_barrier_gap_close_px: int = 170
+    room_barrier_thickness_px: int = 7
+    semantic_room_poly_epsilon_frac: float = 0.002
+    semantic_room_seed_confidence: float = 0.6
 
     # --- Module 10: OCR ---
     ocr_engine: Literal["paddle", "tesseract"] = "paddle"
