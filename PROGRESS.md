@@ -79,6 +79,32 @@
 - Closing raw binary linework produced 27-59 large enclosed components because text, fixtures, schedules, and symbols form false faces.
 - Decision: rejected. Matching the reference room classes requires a major redesign (semantic wall rasterization/opening closure or a learned room segmentation model), not a generalizable threshold tweak.
 
+### Rejected window-strategy ablation
+
+- Strategy A (inner-line matching) produced all 53 windows; Strategy B (face-gap scanning) produced 0 on this wall graph.
+- Disabling Strategy A removed all explicit window detections. Window IoU moved 0.0427 -> 0.0447 because false-positive coloured pixels fell, but foreground IoU regressed 0.1109 -> 0.1058 and actual window recall was lost.
+- Decision: rejected. General improvement needs window-frame evidence, exterior/interior wall semantics, or a trained classifier.
+
+## Final result
+
+- Final authoritative output: `debug_output/final_annotation.pdf`
+- Final preview: `debug_output/final_annotation.png`
+- Final metric report: `evaluation_output/final.json`
+- Final detected objects: 181 walls after door splits, 10 doors, 53 windows, 1 unlabeled room, 63 gaps.
+- Final full suite with OCR access: 132 passed after annotation/detection changes; final restricted suite including OCR failover tests: 134 passed.
+
+| Metric | Baseline | Final | Change |
+|---|---:|---:|---:|
+| Macro IoU | 0.0309 | 0.0455 | +0.0146 (+47.2%) |
+| Macro F1 | 0.0590 | 0.0844 | +0.0254 (+43.1%) |
+| Foreground IoU | 0.0833 | 0.1109 | +0.0276 (+33.1%) |
+| Foreground F1 | 0.1539 | 0.1997 | +0.0458 (+29.8%) |
+| Wall IoU | 0.0634 | 0.1088 | +0.0454 (+71.6%) |
+| Wall boundary F1 | 0.1474 | 0.2266 | +0.0792 (+53.7%) |
+| Door IoU | 0.0000 | 0.0009 | +0.0009 |
+| Window IoU | 0.0311 | 0.0427 | +0.0116 (+37.3%) |
+| Room IoU | 0.0291 | 0.0296 | +0.0005 |
+
 ## Remaining limitations
 
 - The supplied ground truth is a raster overlay, not vector/object annotations. Connected components are therefore only an object-count proxy, especially for the connected wall network.

@@ -61,9 +61,10 @@ choice was made; revisit against real plans.
 - **Vocabulary.** `MASTER` and `MASTER BEDROOM` were added to the default
   vocab so the spec's multi-word combination example ("MASTER" + "BEDROOM")
   can actually match.
-- **Door Hough tuning.** `hough_circles_param2` defaults to the spec's 30;
-  thin (2 px) quarter arcs need ~25 or lower. The debug overlay in module 07
-  is the tuning tool, as the spec notes.
+- **Door Hough tuning.** `hough_circles_param2` defaults to 25 because thin
+  (2 px) quarter arcs were consistently missed at 30. The maximum radius is
+  160 px: at 1/4" = 1'-0" scale and 200 DPI, a common 2'-6" leaf is ~125 px.
+  The debug overlay in module 07 remains the tuning tool for other scales.
 - **Dimension-line hardening (added after testing on a real Calgary plan).**
   Root cause of dimension strings detected as walls: with no OCR engine the
   text-based rules 1-3 silently no-op, and stacked parallel dimension rows
@@ -100,10 +101,9 @@ PYTHONPATH=apps/api/src python -m vision.cv.annotate_cli plan.pdf out.pdf \
 ```
 
 If no OCR engine is installed the labeling stage is skipped with a warning
-(`run_pipeline_state(..., skip_stages=...)`) instead of failing. Note on door
-arcs: at 1/4" = 1'-0" scale and 200 dpi a 2'-6" door swing is ~125 px, above
-the spec default `door_arc_max_radius_px = 80` - pass `--max-arc-radius 160`
-for plans at that scale.
+(`run_pipeline_state(..., skip_stages=...)`) instead of failing. Door arc
+radius and accumulator threshold remain CLI options for plans whose scale
+differs substantially from the 200-DPI defaults.
 
 ## Running
 
