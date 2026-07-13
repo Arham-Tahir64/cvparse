@@ -908,3 +908,56 @@ Proposed coupled change:
   overfitting. Further material improvement requires multiple labeled floor
   plans and a trained semantic/instance detector (or vector/CAD layer metadata),
   followed by the existing topology and semantic-ownership post-processing.
+
+### Cycle 7 goal: export stable semantic room classes and recover circulation
+
+- The latest visual comparison exposed a separate room-architecture failure:
+  all room regions were exported with one generic blue fill, and the central
+  circulation area was not a room object at all. The extractor allowed only one
+  semantic label per connected free-space component. The `UP` label was absent
+  from the room vocabulary and its OCR centre landed on hatch/text ink, while
+  circulation and recreation space remained connected through an open passage.
+- The replacement architecture normalizes labels to stable architectural room
+  classes, snaps an obstructed seed only to nearby free space, permits multiple
+  semantic seeds in a connected component, and partitions shared Manhattan
+  space along the dominant seed axis. Exact per-instance ownership is retained
+  as a raster through semantic-mask and PDF export; polygon export remains a
+  fallback. This is label- and topology-driven and contains no coordinates or
+  pixels from the supplied goal.
+- Room completion is recomputed after cleaned structural extraction and clipped
+  to the detected interior extent, preventing drafting-context margin from
+  becoming recreation-room ownership. Nine independent masks are now exported:
+  guest suite, bath 4, gym/yoga, laundry, linen, mechanical, storage,
+  stair/circulation, and recreation room.
+- Full rendered results versus Cycle 6: wall IoU 0.6407 -> 0.6374, door IoU
+  0.1764 -> 0.2077, window IoU 0.2049 -> 0.2190, room IoU 0.7782 -> 0.7789,
+  macro IoU 0.4501 -> 0.4607, foreground IoU 0.8543 -> 0.8674. The small wall
+  overlay-colour shift is outweighed by improvements in all three other classes
+  and does not alter the direct structural mask.
+- In the measurement-line crop, room IoU improves 0.9158 -> 0.9393 while wall
+  IoU remains 0.7169 and cleaned barriers remain 0 vertical / 2 horizontal.
+  In the missing-wall crop, wall IoU remains 0.4528 with boundary F1 0.7394,
+  while room IoU improves 0.6593 -> 0.6618. Both registered failure cases
+  therefore improve or remain structurally exact at the same time.
+- Files changed: `room_extraction.py`, `room_classes.py`, `config.py`,
+  `models.py`, `semantic_masks.py`, `annotate_pdf.py`, `annotate_cli.py`, the
+  evaluator palette, and focused unit tests. Commands: targeted pytest, full CV
+  pytest, full `annotate_cli`, whole-image evaluator, focused-region evaluator,
+  and seven-layer crop exporter.
+- Tests: 170 passed. Full uncached run: 385.7 s, 116 walls, 8 doors, 5 windows,
+  9/9 labeled rooms, and 13 gaps. Output:
+  `debug_output/highlight_cycle7_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle7_full.json`; intermediates:
+  `debug_output/highlight_cycle7_full_intermediates/`; seven-layer crops:
+  `debug_output/focus_cycle7_full/`.
+
+### Cycle 8 goal: align structural-wall rendering without losing topology
+
+- Whole-output comparison now shows class-palette and wall-geometry deviation
+  as the largest high-confidence visual mismatch. The direct wall structure is
+  unchanged in Cycle 7, but the exported red wall style differs from the goal's
+  purple semantic wall ownership and local bands remain too thick or absent.
+  Audit renderer style separately from structural geometry, then inspect only
+  source-supported face pairs for the remaining local wall error. Retain a
+  change only if whole-image wall IoU and both highlighted regions do not
+  regress.

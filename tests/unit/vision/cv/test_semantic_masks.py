@@ -60,6 +60,33 @@ def test_room_and_door_masks_are_exported_separately():
     assert tuple(state.combined_class_mask[120, 120]) == semantic_masks.CLASS_COLORS["door"]
 
 
+def test_room_instances_keep_distinct_stable_semantic_ownership():
+    state = PipelineState(config=PipelineConfig())
+    state.image = np.full((120, 220), 255, np.uint8)
+    state.rooms = [
+        Room("R1", [Point(10, 10), Point(100, 10), Point(100, 110), Point(10, 110)],
+             label="GUEST SUITE", area=9000),
+        Room("R2", [Point(120, 10), Point(210, 10), Point(210, 110), Point(120, 110)],
+             label="REC ROOM AREA", area=9000),
+    ]
+    state.room_instance_mask = np.zeros(state.image.shape, np.uint8)
+    state.room_instance_mask[10:110, 10:100] = 1
+    state.room_instance_mask[10:110, 120:210] = 2
+    state.room_export_mask = np.where(
+        state.room_instance_mask > 0, 255, 0,
+    ).astype(np.uint8)
+
+    semantic_masks.run(state)
+
+    guest_rgb = semantic_masks.ROOM_CLASS_STYLES["guest_suite"][0]
+    rec_rgb = semantic_masks.ROOM_CLASS_STYLES["recreation_room"][0]
+    assert tuple(state.combined_class_mask[50, 50]) == guest_rgb[::-1]
+    assert tuple(state.combined_class_mask[50, 150]) == rec_rgb[::-1]
+    assert tuple(state.combined_class_mask[50, 50]) != tuple(
+        state.combined_class_mask[50, 150]
+    )
+
+
 def test_suppressed_door_keeps_wall_opening_without_exporting_sector():
     state = PipelineState(config=PipelineConfig())
     state.image = np.full((260, 400), 255, np.uint8)

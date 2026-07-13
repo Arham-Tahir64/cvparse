@@ -14,7 +14,7 @@ DEFAULT_ROOM_LABEL_VOCAB: tuple[str, ...] = (
     "GARAGE", "STAIRS", "STAIR", "POWDER", "STORAGE", "MECHANICAL",
     "MECH", "PRIMARY", "MASTER BEDROOM", "MASTER", "GUEST SUITE",
     "GUEST", "GYM/YOGA", "GYM", "YOGA", "REC ROOM AREA", "REC ROOM",
-    "RECREATION", "LINEN", "LNDRY",
+    "RECREATION", "LINEN", "LNDRY", "UP",
 )
 
 
@@ -202,6 +202,7 @@ class PipelineConfig:
     room_barrier_thickness_px: int = 7
     semantic_room_poly_epsilon_frac: float = 0.002
     semantic_room_seed_confidence: float = 0.6
+    semantic_room_seed_snap_px: int = 20
     semantic_plan_margin_px: int = 90
     # OCR-seeded convex hulls can cut a diagonal corner from an otherwise
     # rectangular Manhattan plan when one open room reaches the exterior.

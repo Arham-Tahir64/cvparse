@@ -26,6 +26,7 @@ import fitz
 import numpy as np
 
 from .models import CVTakeoffResult
+from .room_classes import ROOM_CLASS_NAMES, ROOM_CLASS_STYLES, room_class_key
 
 logger = logging.getLogger("flowbuildr.cv.annotate_pdf")
 
@@ -60,6 +61,7 @@ def annotate_pdf_page(
     wall_mask: Optional[np.ndarray] = None,
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
+    room_instance_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Overlay detections on the original PDF page; returns single-page PDF bytes."""
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -71,6 +73,7 @@ def annotate_pdf_page(
         page, result, scale=72.0 / dpi, roi_mask=roi_mask,
         junctions=junctions, wall_mask=wall_mask,
         door_mask=door_mask, window_mask=window_mask,
+        room_instance_mask=room_instance_mask,
     )
     out = doc.tobytes()
     doc.close()
@@ -86,6 +89,7 @@ def annotate_image_as_pdf(
     wall_mask: Optional[np.ndarray] = None,
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
+    room_instance_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Create a PDF page from a raster image and overlay detections."""
     h, w = image.shape[:2]
@@ -99,6 +103,7 @@ def annotate_image_as_pdf(
         page, result, scale=scale, roi_mask=roi_mask,
         junctions=junctions, wall_mask=wall_mask,
         door_mask=door_mask, window_mask=window_mask,
+        room_instance_mask=room_instance_mask,
     )
     out = doc.tobytes()
     doc.close()
@@ -110,22 +115,30 @@ def _draw(
     wall_mask: Optional[np.ndarray] = None,
     door_mask: Optional[np.ndarray] = None,
     window_mask: Optional[np.ndarray] = None,
+    room_instance_mask: Optional[np.ndarray] = None,
 ) -> None:
     shape = page.new_shape()
 
     def pt(x: float, y: float) -> fitz.Point:
         return fitz.Point(x * scale, y * scale)
 
-    # rooms first so everything else draws on top of the fill
+    # Rooms draw first so structure and openings own their pixels. When the
+    # exact instance raster is available, preserve holes and open-zone splits
+    # rather than filling simplified outer polygons.
+    if room_instance_mask is not None:
+        _insert_room_instance_mask(page, room_instance_mask, result.rooms)
     for room in result.rooms:
         if len(room.polygon) < 3:
             continue
         points = [pt(p.x, p.y) for p in room.polygon]
         shape.draw_polyline(points + [points[0]])
-        shape.finish(
-            color=COLORS["room_stroke"], fill=COLORS["room_fill"],
-            fill_opacity=0.25, width=1.0, closePath=True,
-        )
+        if room_instance_mask is None:
+            shape.finish(
+                color=COLORS["room_stroke"], fill=COLORS["room_fill"],
+                fill_opacity=0.25, width=1.0, closePath=True,
+            )
+        else:
+            shape.finish(color=COLORS["room_stroke"], width=0.5, closePath=True)
 
     # A reconstructed raster wall region can contain fragmented contours and
     # true opening holes that cannot be represented by independent PDF stroke
@@ -274,6 +287,26 @@ def _insert_wall_mask(page, wall_mask: np.ndarray) -> None:
     _insert_semantic_mask(page, wall_mask, COLORS["wall"], 0.85)
 
 
+def _insert_room_instance_mask(page, instance_mask: np.ndarray, rooms) -> None:
+    """Insert exact room instances using the stable per-class palette."""
+    rgba = np.zeros((*instance_mask.shape[:2], 4), np.uint8)
+    for index, room in enumerate(rooms, 1):
+        class_key = room_class_key(room.label)
+        rgb, opacity = ROOM_CLASS_STYLES[class_key]
+        owned = instance_mask == index
+        rgba[owned, 0] = rgb[2]
+        rgba[owned, 1] = rgb[1]
+        rgba[owned, 2] = rgb[0]
+        rgba[owned, 3] = round(255 * opacity)
+    ok, encoded = cv2.imencode(".png", rgba)
+    if not ok:
+        logger.warning("could not encode room instance mask")
+        return
+    page.insert_image(
+        page.rect, stream=encoded.tobytes(), overlay=True, keep_proportion=False,
+    )
+
+
 def _insert_semantic_mask(
     page, semantic_mask: np.ndarray, colour: tuple[float, float, float],
     opacity: float,
@@ -305,10 +338,22 @@ def _draw_legend(page, result: CVTakeoffResult) -> None:
         ("window", f"windows ({len(result.windows)})", COLORS["window"]),
         ("gap_door", "door gaps", COLORS["gap_door"]),
         ("gap_window", "window gaps", COLORS["gap_window"]),
-        ("room", f"rooms ({len(result.rooms)})", COLORS["room_fill"]),
         ("junction", "junctions", COLORS["junction"]),
         ("roi", "structural ROI", COLORS["roi"]),
     ]
+    present_room_classes = []
+    for room in result.rooms:
+        class_key = room_class_key(room.label)
+        if class_key not in present_room_classes:
+            present_room_classes.append(class_key)
+    for class_key in ROOM_CLASS_STYLES:
+        if class_key not in present_room_classes:
+            continue
+        rgb, _ = ROOM_CLASS_STYLES[class_key]
+        entries.append((
+            f"room_{class_key}", ROOM_CLASS_NAMES[class_key],
+            tuple(channel / 255.0 for channel in rgb),
+        ))
     x, y = 10.0, 12.0
     line_h = 11.0
     box = fitz.Rect(x - 4, y - 9, x + 150, y + line_h * len(entries))

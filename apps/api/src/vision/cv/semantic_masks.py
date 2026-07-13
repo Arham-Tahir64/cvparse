@@ -15,6 +15,7 @@ import numpy as np
 
 from .geometry import point_at_param, project_param
 from .models import PipelineState, Point, Wall
+from .room_classes import ROOM_CLASS_STYLES, room_class_key
 
 logger = logging.getLogger("flowbuildr.cv.semantic_masks")
 
@@ -180,7 +181,20 @@ def run(state: PipelineState) -> PipelineState:
     wall_mask[window_mask > 0] = 0
 
     combined = np.zeros((*shape, 3), np.uint8)
-    combined[room_mask > 0] = CLASS_COLORS["room"]
+    room_class_masks: dict[str, np.ndarray] = {}
+    instance_mask = getattr(state, "room_instance_mask", None)
+    if instance_mask is not None and instance_mask.shape == shape:
+        for index, room in enumerate(state.rooms, 1):
+            class_key = room_class_key(room.label)
+            class_mask = room_class_masks.setdefault(
+                class_key, np.zeros(shape, np.uint8),
+            )
+            owned = instance_mask == index
+            class_mask[owned] = 255
+            rgb, _ = ROOM_CLASS_STYLES[class_key]
+            combined[owned] = (rgb[2], rgb[1], rgb[0])
+    else:
+        combined[room_mask > 0] = CLASS_COLORS["room"]
     combined[wall_mask > 0] = CLASS_COLORS["wall"]
     combined[door_mask > 0] = CLASS_COLORS["door"]
     combined[window_mask > 0] = CLASS_COLORS["window"]
@@ -212,6 +226,10 @@ def run(state: PipelineState) -> PipelineState:
     state.debug.segment_counts["13_topology_restored_walls"] = len(recovered_walls)
     state.debug.segment_counts["13_rejected_wall_candidates"] = len(rejected_walls)
     state.debug.segment_counts["13_window_pixels"] = int(np.count_nonzero(window_mask))
+    for class_key, class_mask in room_class_masks.items():
+        state.debug.segment_counts[f"13_room_{class_key}_pixels"] = int(
+            np.count_nonzero(class_mask)
+        )
 
     if state.config.debug_visualize and state.config.debug_output_dir:
         out_dir = os.path.join(state.config.debug_output_dir, MODULE)
@@ -234,6 +252,10 @@ def run(state: PipelineState) -> PipelineState:
         cv2.imwrite(os.path.join(out_dir, "door_mask.png"), door_mask)
         cv2.imwrite(os.path.join(out_dir, "window_mask.png"), window_mask)
         cv2.imwrite(os.path.join(out_dir, "room_region_mask.png"), room_mask)
+        for class_key, class_mask in room_class_masks.items():
+            cv2.imwrite(
+                os.path.join(out_dir, f"room_{class_key}_mask.png"), class_mask,
+            )
         cv2.imwrite(os.path.join(out_dir, "combined_class_mask.png"), combined)
 
     logger.info(

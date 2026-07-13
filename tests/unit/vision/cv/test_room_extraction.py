@@ -1,4 +1,5 @@
 """Tests for module 09 - room extraction, against the spec's test criteria."""
+import cv2
 import numpy as np
 import pytest
 
@@ -206,3 +207,41 @@ def test_room_clip_rectangularizes_only_high_fill_manhattan_envelope():
     mask = room_extraction._rectangularized_room_clip(state, mask)
 
     assert mask[80, 300] == 0
+
+
+def test_obstructed_semantic_seed_snaps_to_nearest_free_component():
+    labels = np.zeros((40, 60), np.int32)
+    labels[8:32, 12:50] = 7
+    # Simulate OCR text/hatch ink covering the exact centre of the label.
+    labels[18:23, 28:33] = 0
+
+    snapped = room_extraction._nearest_free_seed(labels, 30, 20, radius=8)
+
+    assert snapped is not None
+    component, x, y = snapped
+    assert component == 7
+    assert labels[y, x] == 7
+    assert (x - 30) ** 2 + (y - 20) ** 2 <= 8 ** 2
+
+
+def test_manhattan_semantic_partition_preserves_component_and_axis_boundary():
+    component = np.zeros((80, 100), np.uint8)
+    component[10:70, 10:90] = 255
+    seeds = [
+        ("STAIR/CIRCULATION", 1.0, 45, 25),
+        ("REC ROOM AREA", 0.95, 55, 60),
+    ]
+
+    partitions = room_extraction._partition_seeded_component(
+        component, seeds, manhattan=True,
+    )
+
+    assert len(partitions) == 2
+    upper = partitions[0][2]
+    lower = partitions[1][2]
+    assert upper[20, 50] == 255
+    assert upper[60, 50] == 0
+    assert lower[20, 50] == 0
+    assert lower[60, 50] == 255
+    assert np.count_nonzero(cv2.bitwise_and(upper, lower)) == 0
+    assert np.array_equal(cv2.bitwise_or(upper, lower), component)

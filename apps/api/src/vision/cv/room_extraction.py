@@ -72,6 +72,7 @@ _ROOM_LABEL_ALIASES = {
     "LNDRY": "LAUNDRY",
     "REC ROOM AREA": "REC ROOM AREA",
     "MECHANICAL": "MECHANICAL",
+    "UP": "STAIR/CIRCULATION",
 }
 
 
@@ -137,12 +138,19 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     if count <= 1:
         return []
 
-    by_component: dict[int, tuple[str, float]] = {}
+    by_component: dict[int, dict[str, tuple[float, int, int]]] = {}
     for label, confidence, sx, sy in seeds:
         cx, cy = sx - x, sy - y
         if not (0 <= cx < w and 0 <= cy < h):
             continue
         component_id = int(labels[cy, cx])
+        if component_id == 0:
+            snapped = _nearest_free_seed(
+                labels, cx, cy, int(config.semantic_room_seed_snap_px),
+            )
+            if snapped is None:
+                continue
+            component_id, cx, cy = snapped
         if component_id == 0:
             continue
         area = int(stats[component_id, cv2.CC_STAT_AREA])
@@ -150,36 +158,50 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
             continue
         if area > config.max_room_area_frac * float(w * h):
             continue
-        previous = by_component.get(component_id)
-        if previous is None or confidence > previous[1]:
-            by_component[component_id] = (label, confidence)
+        component_seeds = by_component.setdefault(component_id, {})
+        previous = component_seeds.get(label)
+        if previous is None or confidence > previous[0]:
+            component_seeds[label] = (confidence, cx, cy)
 
     rooms: list[Room] = []
     selected_free = np.zeros(state.image.shape[:2], np.uint8)
-    for component_id, (label, confidence) in by_component.items():
+    room_instances = np.zeros(state.image.shape[:2], np.uint8)
+    for component_id, component_seed_map in by_component.items():
         component = (labels == component_id).astype(np.uint8) * 255
-        selected_free[y:y + h, x:x + w] = cv2.bitwise_or(
-            selected_free[y:y + h, x:x + w], component,
-        )
-        contours, _ = cv2.findContours(
-            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            continue
-        contour = max(contours, key=cv2.contourArea)
-        epsilon = config.semantic_room_poly_epsilon_frac * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-        polygon = [
-            Point(float(point[0][0] + x), float(point[0][1] + y))
-            for point in approx
+        component_seeds = [
+            (label, confidence, cx, cy)
+            for label, (confidence, cx, cy) in component_seed_map.items()
         ]
-        if len(polygon) < 3:
-            continue
-        rooms.append(Room(
-            id=id_gen(), polygon=polygon,
-            area=float(stats[component_id, cv2.CC_STAT_AREA]),
-            label=label, label_confidence=confidence,
-        ))
+        partitions = _partition_seeded_component(
+            component, component_seeds, manhattan=config.manhattan,
+        )
+        for label, confidence, region in partitions:
+            area = int(cv2.countNonZero(region))
+            if area < config.min_room_area_px:
+                continue
+            contours, _ = cv2.findContours(
+                region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            if not contours:
+                continue
+            contour = max(contours, key=cv2.contourArea)
+            epsilon = (
+                config.semantic_room_poly_epsilon_frac
+                * cv2.arcLength(contour, True)
+            )
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            polygon = [
+                Point(float(point[0][0] + x), float(point[0][1] + y))
+                for point in approx
+            ]
+            if len(polygon) < 3:
+                continue
+            rooms.append(Room(
+                id=id_gen(), polygon=polygon, area=float(area),
+                label=label, label_confidence=confidence,
+            ))
+            selected_free[y:y + h, x:x + w][region > 0] = 255
+            room_instances[y:y + h, x:x + w][region > 0] = len(rooms)
 
     # Preserve the conservative polygons for window exterior-context checks.
     # Export completion below must not make both sides of an exterior window
@@ -189,17 +211,32 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     ]
 
     room_export = selected_free
+    instance_export = room_instances
     if rooms and semantic_plan is not None:
         completed_plan = _rectangularized_room_clip(state, semantic_plan)
         completion = cv2.bitwise_and(
             completed_plan, cv2.bitwise_not(semantic_plan),
         )
+        # semantic_plan includes a drafting-context margin outside exterior
+        # walls. Corner completion may repair a diagonal hull cut, but room
+        # ownership must stay within the exact interior room extents.
+        rx, ry, rw, rh = cv2.boundingRect(selected_free)
+        interior_clip = np.zeros_like(completion)
+        if rw > 0 and rh > 0:
+            cv2.rectangle(
+                interior_clip, (rx, ry), (rx + rw - 1, ry + rh - 1),
+                255, cv2.FILLED,
+            )
+            completion = cv2.bitwise_and(completion, interior_clip)
         if np.any(completion):
             room_export = cv2.bitwise_or(selected_free, completion)
             # The largest open/circulation room owns the missing plan corner.
             # Extend only that object for vector export; the exact raster below
             # remains unchanged for structural boundary support.
             largest = max(rooms, key=lambda room: room.area)
+            largest_index = rooms.index(largest) + 1
+            instance_export = room_instances.copy()
+            instance_export[completion > 0] = largest_index
             polygon_mask = np.zeros(state.image.shape[:2], np.uint8)
             cv2.fillPoly(
                 polygon_mask,
@@ -229,10 +266,66 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     # region. This raster is computed after drafting removal when available.
     state.room_free_space_mask = selected_free if rooms else None
     state.room_export_mask = room_export if rooms else None
+    state.room_instance_mask = instance_export if rooms else None
 
     logger.info("semantic raster extraction found %d rooms from %d seeds",
                 len(rooms), len(seeds))
     return rooms
+
+
+def _nearest_free_seed(
+    labels: np.ndarray, cx: int, cy: int, radius: int,
+) -> tuple[int, int, int] | None:
+    """Snap an OCR seed obstructed by text/hatch ink to nearby free space."""
+    y0, y1 = max(0, cy - radius), min(labels.shape[0], cy + radius + 1)
+    x0, x1 = max(0, cx - radius), min(labels.shape[1], cx + radius + 1)
+    yy, xx = np.nonzero(labels[y0:y1, x0:x1])
+    if len(xx) == 0:
+        return None
+    xx = xx + x0
+    yy = yy + y0
+    distances = (xx - cx) ** 2 + (yy - cy) ** 2
+    nearest = int(np.argmin(distances))
+    if distances[nearest] > radius * radius:
+        return None
+    sx, sy = int(xx[nearest]), int(yy[nearest])
+    return int(labels[sy, sx]), sx, sy
+
+
+def _partition_seeded_component(
+    component: np.ndarray,
+    seeds: list[tuple[str, float, int, int]],
+    manhattan: bool = False,
+) -> list[tuple[str, float, np.ndarray]]:
+    """Partition an open component containing multiple semantic room labels."""
+    if len(seeds) == 1:
+        label, confidence, _, _ = seeds[0]
+        return [(label, confidence, component)]
+    yy, xx = np.nonzero(component)
+    if manhattan and len(seeds) == 2:
+        _, _, ax, ay = seeds[0]
+        _, _, bx, by = seeds[1]
+        if abs(by - ay) >= abs(bx - ax):
+            midpoint = (ay + by) / 2.0
+            owners = np.where(
+                yy <= midpoint if ay <= by else yy >= midpoint, 0, 1,
+            )
+        else:
+            midpoint = (ax + bx) / 2.0
+            owners = np.where(
+                xx <= midpoint if ax <= bx else xx >= midpoint, 0, 1,
+            )
+    else:
+        distances = np.stack([
+            (xx - cx) ** 2 + (yy - cy) ** 2 for _, _, cx, cy in seeds
+        ])
+        owners = np.argmin(distances, axis=0)
+    output = []
+    for index, (label, confidence, _, _) in enumerate(seeds):
+        region = np.zeros_like(component)
+        region[yy[owners == index], xx[owners == index]] = 255
+        output.append((label, confidence, region))
+    return output
 
 
 def build_semantic_plan_mask(state) -> np.ndarray | None:

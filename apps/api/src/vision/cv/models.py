@@ -261,6 +261,8 @@ class PipelineState:
     # holes inside concave/circulation regions.
     room_free_space_mask: Optional[np.ndarray] = None
     room_export_mask: Optional[np.ndarray] = None
+    # Exact per-room ownership: 0 is non-room, values 1..N map to state.rooms.
+    room_instance_mask: Optional[np.ndarray] = None
     room_region_mask: Optional[np.ndarray] = None
     combined_class_mask: Optional[np.ndarray] = None
     dpi: int = 200
