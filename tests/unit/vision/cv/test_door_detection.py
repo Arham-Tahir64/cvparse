@@ -48,6 +48,13 @@ def test_quarter_arc_near_wall_detected():
     assert 40 <= door.radius <= 60
 
 
+def test_common_scaled_door_radius_is_within_search_defaults():
+    """A 2'-6" leaf at 1/4" scale and 200 DPI is about 125 pixels."""
+    config = PipelineConfig()
+    assert config.door_arc_min_radius_px < 125 < config.door_arc_max_radius_px
+    assert config.hough_circles_param2 <= 25
+
+
 def test_full_circle_rejected():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255

@@ -43,11 +43,11 @@ def main(argv=None) -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("--page", type=int, default=0, help="PDF page number")
     parser.add_argument("--dpi", type=int, default=200, help="working DPI")
-    parser.add_argument("--param2", type=float, default=30.0,
+    parser.add_argument("--param2", type=float, default=25.0,
                         help="Hough accumulator threshold for door arcs (20-50)")
     parser.add_argument("--min-arc-radius", type=float, default=20.0,
                         help="min door swing radius in px")
-    parser.add_argument("--max-arc-radius", type=float, default=80.0,
+    parser.add_argument("--max-arc-radius", type=float, default=160.0,
                         help="max door swing radius in px (a 2'-6\" door at "
                              "1/4\" scale and 200 dpi is ~125 px)")
     parser.add_argument("--preview", type=Path, default=None,

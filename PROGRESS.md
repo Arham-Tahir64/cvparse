@@ -54,6 +54,16 @@
 - Objects/runtime: unchanged at 175 walls, 0 doors, 53 windows, 1 unlabeled room; 375.2 s.
 - Result: retained. Wall IoU 0.0634 -> 0.1095 (+72.7%), wall F1 0.1192 -> 0.1974, wall boundary F1 0.1474 -> 0.2310. Foreground IoU 0.0833 -> 0.1074; macro IoU 0.0309 -> 0.0449 and macro F1 0.0590 -> 0.0831.
 
+### 2. Search the physical door-radius range at working scale
+
+- Issue: the 80 px maximum excluded a documented ~125 px common 2'-6" door leaf at 1/4" scale and 200 DPI; accumulator threshold 30 also missed thin architectural arcs.
+- Hypothesis: a 160 px upper bound and the already-tested 25-vote Hough threshold cover common scaled leaves while existing arc-coverage and wall-association checks limit false positives.
+- Files: `apps/api/src/vision/cv/config.py`, `apps/api/src/vision/cv/annotate_cli.py`, `tests/unit/vision/cv/test_door_detection.py`, `PROGRESS.md`
+- Candidate comparison from one shared stage-6 state: radius 160/threshold 30 -> 3 doors; radius 160/threshold 25 -> 10 doors; additionally increasing wall snap 15 -> 25 -> 14 doors but worse door precision, so the snap change was rejected.
+- Commands/tests: full suite (132 passed); downstream candidate harness; full current-default CLI writing `debug_output/door_scale.{pdf,png}`; semantic evaluation writing `evaluation_output/door_scale.json`.
+- Objects/runtime: 181 walls (door splits included), 10 doors, 53 windows, 1 unlabeled room, 63 gaps; 374.3 s.
+- Result: retained. Door IoU 0 -> 0.0009 and door F1 0 -> 0.0018; foreground IoU 0.1074 -> 0.1109; macro IoU 0.0449 -> 0.0455 and macro F1 0.0831 -> 0.0844. The small pixel score reflects the renderer's sparse hinge/line representation versus filled ground-truth door regions.
+
 ## Remaining limitations
 
 - The supplied ground truth is a raster overlay, not vector/object annotations. Connected components are therefore only an object-count proxy, especially for the connected wall network.

@@ -102,12 +102,13 @@ class PipelineConfig:
 
     # --- Module 07: Doors ---
     door_arc_min_radius_px: float = 20.0
-    door_arc_max_radius_px: float = 80.0
+    # At 1/4" = 1'-0" and 200 DPI a common 2'-6" leaf is ~125 px.
+    door_arc_max_radius_px: float = 160.0
     door_wall_snap_px: float = 15.0
     hough_circles_dp: float = 1.0
     hough_circles_min_dist: float = 30.0
     hough_circles_param1: float = 100.0        # Canny upper threshold
-    hough_circles_param2: float = 30.0         # accumulator threshold; tune 20-50
+    hough_circles_param2: float = 25.0         # accumulator threshold; tune 20-50
     arc_coverage_min: float = 0.15
     arc_coverage_max: float = 0.40
     door_dedup_dist_px: float = 10.0           # hinge distance for deduplication
