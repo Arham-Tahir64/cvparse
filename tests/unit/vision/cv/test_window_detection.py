@@ -202,3 +202,20 @@ def test_exterior_context_requires_room_hull_boundary():
     assert not window_detection._has_exterior_context(
         interior, Point(300, 200), state, state.config
     )
+
+
+def test_exterior_window_must_be_tangent_to_nearest_hull_edge():
+    state = make_state([])
+    state.rooms = [Room(
+        "R1", [Point(100, 100), Point(500, 100), Point(500, 300), Point(100, 300)],
+        area=80000,
+    )]
+    parallel = wall("WP", 200, 100, 400, 100)
+    perpendicular = wall("WX", 300, 80, 300, 160)
+
+    assert window_detection._has_exterior_tangent(
+        parallel, Point(300, 100), state, state.config
+    )
+    assert not window_detection._has_exterior_tangent(
+        perpendicular, Point(300, 100), state, state.config
+    )

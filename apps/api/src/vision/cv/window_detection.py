@@ -61,8 +61,9 @@ def run(state: PipelineState) -> PipelineState:
 
     state.windows = windows
     _resolve_door_window_conflicts(state)
-    state.debug.segment_counts["08_windows"] = len(windows)
-    logger.info("detected %d windows", len(windows))
+    _filter_nontangent_windows(state)
+    state.debug.segment_counts["08_windows"] = len(state.windows)
+    logger.info("detected %d windows", len(state.windows))
 
     if config.debug_visualize and config.debug_output_dir:
         os.makedirs(config.debug_output_dir, exist_ok=True)
@@ -109,6 +110,35 @@ def _resolve_door_window_conflicts(state: PipelineState) -> None:
         )
     ]
     state.debug.segment_counts["08_door_window_conflicts"] = len(conflicts)
+
+
+def _filter_nontangent_windows(state: PipelineState) -> None:
+    """Reject framed candidates whose supporting wall is not shell-tangent."""
+    wall_lookup = {wall.id: wall for wall in state.walls}
+    for wall in state.walls:
+        for source_id in wall.source_ids:
+            wall_lookup.setdefault(source_id, wall)
+    rejected = [
+        window for window in state.windows
+        if (
+            wall_lookup.get(window.wall_id) is None
+            or not _has_exterior_tangent(
+                wall_lookup[window.wall_id], window.position, state, state.config,
+            )
+        )
+    ]
+    rejected_ids = {window.id for window in rejected}
+    state.windows = [
+        window for window in state.windows if window.id not in rejected_ids
+    ]
+    state.gaps = [
+        gap for gap in state.gaps
+        if not (
+            gap.kind == "window"
+            and any(gap.center.distance_to(window.position) <= 2.0 for window in rejected)
+        )
+    ]
+    state.debug.segment_counts["08_nontangent_windows"] = len(rejected)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +326,31 @@ def _has_exterior_context(wall, center, state, config) -> bool:
     hull = cv2.convexHull(hull_points.reshape(-1, 1, 2))
     distance = abs(cv2.pointPolygonTest(hull, (center.x, center.y), True))
     return distance <= config.window_exterior_hull_dist_px
+
+
+def _has_exterior_tangent(wall, center, state, config) -> bool:
+    context_rooms = getattr(state, "window_context_rooms", None) or state.rooms
+    if not config.window_require_exterior_context or not context_rooms:
+        return True
+    hull_points = np.asarray(
+        [[point.x, point.y] for room in context_rooms for point in room.polygon],
+        dtype=np.float32,
+    )
+    if len(hull_points) < 3:
+        return False
+    hull = cv2.convexHull(hull_points.reshape(-1, 1, 2))
+
+    # Distance alone admits short interior/fixture lines near the shell. A
+    # window span must also be tangent to the nearest exterior hull edge.
+    vertices = [Point(float(item[0][0]), float(item[0][1])) for item in hull]
+    edge = min(
+        zip(vertices, vertices[1:] + vertices[:1]),
+        key=lambda pair: point_to_line_distance(center, pair[0], pair[1]),
+    )
+    edge_angle = math.atan2(edge[1].y - edge[0].y, edge[1].x - edge[0].x)
+    return angle_diff_rad(wall.centerline.angle_rad, edge_angle) <= math.radians(
+        config.window_exterior_tangent_angle_tol_deg
+    )
 
 
 def _door_param_ranges(wall, cl, state):

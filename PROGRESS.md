@@ -857,3 +857,54 @@ Proposed coupled change:
   are unsafe without source-supported arc evidence. Inspect whether a wall-gap-
   seeded detector can recover missing hinges from opening plus leaf evidence;
   otherwise document the need for labeled door examples or a learned detector.
+
+### Cycle 6 retained: require exterior-window shell tangency
+
+- Individual window audit found two structural false positives with zero truth
+  overlap: a horizontal framed line at the vertical shell and a vertical framed
+  line at the horizontal shell. The previous exterior check required only
+  inside/outside room context and hull proximity; it did not verify that the
+  supporting wall followed the nearest exterior edge.
+- Exterior window candidates must now be parallel to the nearest semantic hull
+  edge within 20 degrees. Cross-class door/window reconciliation intentionally
+  runs before this filter, so a non-tangent framed candidate can still suppress
+  a contradictory door classification before both false classes are removed.
+- Direct metrics versus Cycle 5: window IoU 0.2510 -> 0.2624 and wall IoU
+  0.5010 -> 0.5027. Full rendered metrics: wall IoU 0.6389 -> 0.6407, door IoU
+  0.1763 -> 0.1764, window IoU 0.1990 -> 0.2049, room IoU 0.7783 -> 0.7782,
+  macro IoU 0.4481 -> 0.4501. Direct room geometry is unchanged; the 0.0001
+  rendered room change is class-overlay ownership.
+- Rejected door architecture experiment: using original in-plan ink for circle
+  proposals recovered candidates near two missing doors but generated 810
+  circles and 23 accepted sectors. Direct door IoU fell 0.2361 -> 0.1852.
+  Candidates in the missing-door regions still selected fixture-supported wrong
+  quadrants; mirroring them toward the goal would be image-specific.
+- Rejected window experiment: requiring a physical two-face wall gap cannot
+  distinguish survivors. All five remaining framed candidates have both-open
+  fraction 0.0 and either-open fraction 0.0 in the cleaned structure, including
+  both high-quality and residual false candidates.
+- Both highlighted cases remain exact: recreation room wall IoU 0.7169, room
+  IoU 0.9158, barriers 0 vertical / 2 horizontal; missing-wall crop wall IoU
+  0.4528, boundary F1 0.7394, room IoU 0.6593.
+- Tests: 165 passed. Full uncached run: 378.4 s, 116 walls, 8 doors, 5 windows,
+  8/8 rooms, 13 gaps. Final output:
+  `debug_output/highlight_cycle6_full.{pdf,png}`; final metrics:
+  `evaluation_output/highlight_cycle6_full.json`; final intermediates:
+  `debug_output/highlight_cycle6_full_intermediates/`; final seven-layer crops:
+  `debug_output/focus_cycle6_full/`.
+
+### Final stopping condition and limitations
+
+- The two user-registered regressions are fixed without a tradeoff: interior
+  dimensions no longer split the recreation room, and the missing-wall crop is
+  substantially restored while measurement pixels remain rejected.
+- Meaningful deviations remain, chiefly door sector localization/quadrants
+  (rendered IoU 0.1764), incomplete/misaligned windows (0.2049), local wall
+  omissions/excess thickness (0.6407), and imperfect room boundaries (0.7782).
+- Repeated original/cleaned Hough, confidence, quadrant, snap, opening-support,
+  and wall-face experiments show that fixtures and true doors/windows share the
+  same available geometric cues in this drawing. The single provided reference
+  cannot supply enough labeled variation to learn that distinction without
+  overfitting. Further material improvement requires multiple labeled floor
+  plans and a trained semantic/instance detector (or vector/CAD layer metadata),
+  followed by the existing topology and semantic-ownership post-processing.

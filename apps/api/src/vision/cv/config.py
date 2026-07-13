@@ -186,6 +186,7 @@ class PipelineConfig:
     window_require_exterior_context: bool = True
     window_exterior_sample_px: float = 18.0
     window_exterior_hull_dist_px: float = 80.0
+    window_exterior_tangent_angle_tol_deg: float = 20.0
     window_scan_min_samples: int = 20
 
     # --- Module 09: Rooms ---
