@@ -37,7 +37,16 @@ def _load_engine(preferred: str) -> Optional[Any]:
     if preferred == "tesseract":
         loaders.reverse()
     for loader in loaders:
-        engine = loader()
+        try:
+            engine = loader()
+        except Exception as exc:
+            # Importability does not guarantee usability: model caches can be
+            # missing/corrupt/unreadable and native runtimes can fail during
+            # construction. Treat one backend's initialization failure the
+            # same as unavailability so the next configured backend can run.
+            logger.warning("OCR backend %s failed to initialize: %s",
+                           loader.__name__, exc)
+            continue
         if engine is not None:
             return engine
     return None

@@ -64,6 +64,21 @@
 - Objects/runtime: 181 walls (door splits included), 10 doors, 53 windows, 1 unlabeled room, 63 gaps; 374.3 s.
 - Result: retained. Door IoU 0 -> 0.0009 and door F1 0 -> 0.0018; foreground IoU 0.1074 -> 0.1109; macro IoU 0.0449 -> 0.0455 and macro F1 0.0831 -> 0.0844. The small pixel score reflects the renderer's sparse hinge/line representation versus filled ground-truth door regions.
 
+### 3. Fall back when an OCR backend cannot initialize
+
+- Issue: backend discovery handled missing imports but allowed model-cache permission, corruption, and native-runtime initialization errors to abort the CLI. This caused 9 test failures and no baseline output under the restricted runtime.
+- Hypothesis: isolate initialization errors per backend and continue to the next backend; callers can then use the existing documented no-OCR behavior when none is usable.
+- Files: `apps/api/src/vision/cv/ocr_engines.py`, `tests/unit/vision/cv/test_ocr_engines.py`, `PROGRESS.md`
+- Commands/tests: focused failover tests (2 passed); full restricted suite (134 passed versus 122 passed/9 failed at baseline); restricted real-plan CLI writing `debug_output/ocr_fallback.{pdf,png}`.
+- Result: retained as a reproducibility fix, not an annotation-score claim. With no usable fallback executable, the CLI now completes in 23.9 s using its existing no-OCR path (186 walls after door splits, 4 doors, 59 windows, 1 room) instead of aborting. The authoritative quality artifact remains the PaddleOCR run `debug_output/door_scale.png`.
+
+### Rejected room-topology experiments
+
+- Existing planar graph: 1 room; existing wall-mask flood fill: 0 rooms.
+- Morphological closing of the detected wall mask (5-61 px) produced at most 3 regions and was unstable across closure size.
+- Closing raw binary linework produced 27-59 large enclosed components because text, fixtures, schedules, and symbols form false faces.
+- Decision: rejected. Matching the reference room classes requires a major redesign (semantic wall rasterization/opening closure or a learned room segmentation model), not a generalizable threshold tweak.
+
 ## Remaining limitations
 
 - The supplied ground truth is a raster overlay, not vector/object annotations. Connected components are therefore only an object-count proxy, especially for the connected wall network.
