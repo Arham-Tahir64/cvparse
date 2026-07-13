@@ -27,12 +27,15 @@ MODULE = "05_wall_extraction"
 def run(state: PipelineState) -> PipelineState:
     config = state.config
     id_gen = IdGenerator("W")
+    binary = (state.binary_cleaned if state.binary_cleaned is not None
+              else state.binary_masked if state.binary_masked is not None
+              else state.binary)
 
     candidates = [
         s for s in state.classified_lines
         if s.classification in ("unknown", "wall") and s.length >= config.wall_min_length_px
     ]
-    walls, used_ids = _primary_pairing(candidates, state.binary, config, id_gen)
+    walls, used_ids = _primary_pairing(candidates, binary, config, id_gen)
     logger.debug("primary pairing produced %d walls", len(walls))
 
     unused = [
@@ -50,7 +53,7 @@ def run(state: PipelineState) -> PipelineState:
     logger.debug("single-face fallback produced %d walls", len(single_walls))
 
     for wall in walls:
-        wall.visual_thickness = _measure_visual_thickness(wall, state.binary, config)
+        wall.visual_thickness = _measure_visual_thickness(wall, binary, config)
 
     if not walls:
         raise NoWallsFoundError(MODULE, "no walls found by any extraction branch")

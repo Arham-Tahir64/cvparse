@@ -15,12 +15,14 @@ import numpy as np
 
 from . import (
     door_detection,
+    drafting_removal,
     junction_snapping,
     line_detection,
     line_filters,
     ocr_labeling,
     preprocessing,
     room_extraction,
+    semantic_masks,
     structural_roi,
     wall_extraction,
     window_detection,
@@ -33,14 +35,18 @@ logger = logging.getLogger("flowbuildr.cv.pipeline")
 _STAGES = [
     ("01_preprocessing", preprocessing.run),
     ("02_structural_roi", structural_roi.run),
-    ("03_line_detection", line_detection.run),
-    ("04_line_filters", line_filters.run),
-    ("05_wall_extraction", wall_extraction.run),
-    ("06_junction_snapping", junction_snapping.run),
-    ("07_door_detection", door_detection.run),
-    ("08_window_detection", window_detection.run),
-    ("09_room_extraction", room_extraction.run),
-    ("10_ocr_labeling", ocr_labeling.run),
+    ("03_line_detection_proposals", line_detection.run),
+    ("04_line_filter_proposals", line_filters.run),
+    ("05_drafting_removal", drafting_removal.run),
+    ("06_line_detection_clean", line_detection.run),
+    ("07_line_filters_clean", line_filters.run),
+    ("08_wall_extraction", wall_extraction.run),
+    ("09_junction_snapping", junction_snapping.run),
+    ("10_door_detection", door_detection.run),
+    ("11_room_extraction", room_extraction.run),
+    ("12_window_detection", window_detection.run),
+    ("13_semantic_masks", semantic_masks.run),
+    ("14_ocr_labeling", ocr_labeling.run),
 ]
 
 
@@ -55,7 +61,7 @@ def run_pipeline_state(
 ) -> PipelineState:
     """Run the stages and return the full PipelineState.
 
-    `skip_stages` lets debug tools omit stages by name (e.g. "10_ocr_labeling"
+    `skip_stages` lets debug tools omit stages by name (e.g. "14_ocr_labeling"
     when no OCR engine is installed); a skipped stage is recorded in
     state.debug.messages. `tolerate_stage_errors` (debug tools only) records a
     failed stage in state.debug.messages and continues instead of raising -

@@ -180,7 +180,7 @@ def to_svg(
         parts.append(
             f'<line x1="{_num(cl.start.x)}" y1="{_num(cl.start.y)}" '
             f'x2="{_num(cl.end.x)}" y2="{_num(cl.end.y)}" stroke="{color}" '
-            f'stroke-width="{_num(wall.visual_thickness)}"/>'
+            f'stroke-width="{_num(max(wall.thickness, wall.visual_thickness))}"/>'
         )
 
     for door in result.doors:
@@ -203,13 +203,24 @@ def to_svg(
             f'<circle cx="{_num(p.x)}" cy="{_num(p.y)}" r="3" fill="#2ca02c"/>'
         )
 
+    wall_lookup = {wall.id: wall for wall in result.walls}
+    for wall in result.walls:
+        for source_id in wall.source_ids:
+            wall_lookup.setdefault(source_id, wall)
     for window in result.windows:
         p = window.position
+        wall = wall_lookup.get(window.wall_id)
+        if wall is None:
+            continue
+        cl = wall.centerline
+        length = max(1e-6, cl.length)
+        ux, uy = (cl.end.x - cl.start.x) / length, (cl.end.y - cl.start.y) / length
         half = window.width / 2.0
+        thickness = max(wall.thickness, wall.visual_thickness)
         parts.append(
-            f'<line x1="{_num(p.x - half)}" y1="{_num(p.y)}" '
-            f'x2="{_num(p.x + half)}" y2="{_num(p.y)}" '
-            'stroke="#ff7f0e" stroke-width="3"/>'
+            f'<line x1="{_num(p.x - ux * half)}" y1="{_num(p.y - uy * half)}" '
+            f'x2="{_num(p.x + ux * half)}" y2="{_num(p.y + uy * half)}" '
+            f'stroke="#1f77b4" stroke-width="{_num(thickness)}"/>'
         )
 
     parts.append("</svg>")

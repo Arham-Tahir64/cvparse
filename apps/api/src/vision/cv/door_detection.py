@@ -26,7 +26,9 @@ _ARC_SAMPLES = 72  # points sampled around each candidate circle
 
 def run(state: PipelineState) -> PipelineState:
     config = state.config
-    binary = state.binary_masked if state.binary_masked is not None else state.binary
+    binary = (state.binary_cleaned if state.binary_cleaned is not None
+              else state.binary_masked if state.binary_masked is not None
+              else state.binary)
 
     erased = _erase_walls(binary, state.walls, config)
     circles = _hough_circles(erased, config)

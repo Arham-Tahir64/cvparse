@@ -68,7 +68,7 @@ def test_full_pipeline(synthetic_plan, monkeypatch):
     assert "KITCHEN" in labels
     assert "LIVING" in labels
     assert all(t >= 0 for t in result.debug.stage_timings.values())
-    assert len(result.debug.stage_timings) == 10
+    assert len(result.debug.stage_timings) == 14
 
     # serialization round trip
     import json

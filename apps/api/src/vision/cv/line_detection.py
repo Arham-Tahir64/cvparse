@@ -31,22 +31,25 @@ def run(state: PipelineState) -> PipelineState:
         raise NoLinesDetectedError(MODULE, "no line segments after length filtering")
 
     state.debug.segment_counts["03_raw_lsd"] = len(segments)
-    merged = _merge_collinear(segments, state.binary, config)
+    merged = _merge_collinear(segments, binary, config)
     state.debug.segment_counts["03_merged"] = len(merged)
     logger.debug("LSD segments: %d, after merge: %d", len(segments), len(merged))
 
     state.raw_lines = merged
 
-    engine = ocr_engines.get_engine(config.ocr_engine)
-    if engine is None:
-        msg = "first-pass OCR skipped: no OCR engine available"
-        logger.warning(msg)
-        state.debug.messages.append(msg)
-        state.raw_texts = []
-    else:
-        state.raw_texts = run_ocr_first_pass(
-            state.image, engine, config.ocr_first_pass_confidence
-        )
+    # The clean structural pass reuses OCR from the proposal pass. OCR must see
+    # the original plan so labels and measurement context remain available.
+    if not state.raw_texts:
+        engine = ocr_engines.get_engine(config.ocr_engine)
+        if engine is None:
+            msg = "first-pass OCR skipped: no OCR engine available"
+            logger.warning(msg)
+            state.debug.messages.append(msg)
+            state.raw_texts = []
+        else:
+            state.raw_texts = run_ocr_first_pass(
+                state.image, engine, config.ocr_first_pass_confidence
+            )
 
     if config.debug_visualize and config.debug_output_dir:
         os.makedirs(config.debug_output_dir, exist_ok=True)
@@ -184,8 +187,8 @@ def _merge_chain(
 def _gap_fill_fraction(a: LineSegment, b: LineSegment, binary: np.ndarray) -> float:
     """Fraction of foreground pixels sampled along the gap between a's end and b's start.
 
-    Samples state.binary (unmasked) so the ROI boundary cannot create false
-    empty regions.
+    The caller supplies the same proposal or cleaned binary used by LSD, so a
+    removed drafting line cannot bridge segments back together.
     """
     # endpoints closest to each other define the gap
     pairs = [(pa, pb) for pa in (a.start, a.end) for pb in (b.start, b.end)]

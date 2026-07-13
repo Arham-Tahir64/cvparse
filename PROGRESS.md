@@ -233,3 +233,95 @@ nearby central doors overlap. Separating those cases reliably requires door
 type/schedule semantics or labeled examples rather than a plan-specific tag
 rule. Window localization and wall recall remain materially below the room and
 door gains.
+
+## Dedicated drafting-removal redesign (continued objective)
+
+### Completion audit of the previous architecture
+
+- The semantic plan envelope only reclassified LSD segments during line
+  filtering. It did not remove drafting pixels, and line detection, wall face
+  support, door detection, window detection, and room barriers still consumed
+  `binary_masked`, which contains the measurement layer.
+- No drafting mask or cleaned plan image was exported. The debug outputs also
+  lacked independent wall, window, and room-region masks.
+- PDF walls were stroked centerlines and windows were always drawn as
+  horizontal ticks, even on vertical supporting walls. The latter cannot
+  represent the complete window span and wall relationship.
+
+### Proposed replacement
+
+1. Run the existing OCR/line classification as a proposal pass, before final
+   structural detection.
+2. Build a dedicated drafting mask from dimension text, dimension/tick/leader/
+   grid/hatch segments, connected extension geometry, and all ink outside the
+   OCR-seeded plan envelope.
+3. Protect provisional parallel wall faces, remove only the drafting mask, and
+   directionally repair short gaps inside protected wall corridors. Door-sized
+   openings and curved swing geometry remain untouched.
+4. Re-run line detection and classification on the cleaned binary, then run
+   wall, door, window, and room stages exclusively on that cleaned input.
+5. Export the drafting mask, cleaned image, structural-protection mask, filled
+   wall mask, window mask, room-region mask, and a consistent combined class
+   mask. Render wall footprints as filled polygons and windows as filled spans
+   aligned to their supporting wall.
+
+This is a two-pass, context-aware preprocessing architecture rather than a
+global morphology filter: geometry proposes removal, semantic location and
+measurement text supply context, and paired structural faces explicitly veto
+destructive removal.
+
+### Dedicated drafting removal retained
+
+- Implementation: the pipeline now runs proposal OCR/lines and contextual
+  classification, writes an explicit drafting mask, removes it while restoring
+  139 high-confidence paired wall corridors, and re-runs line detection and
+  classification on the cleaned binary. The clean pass reduced remaining
+  dimension-classified segments from 566 to 3 and removed 94,256 net ink
+  pixels without modifying the source image used by OCR.
+- Safety evidence: synthetic tests prove that a dimension baseline and
+  dimension text are removed, paired wall faces survive, curved door geometry
+  survives, exterior drafting ink is removed, and only short protected gaps
+  are repaired. On the real plan, wall IoU, room IoU, and door IoU all improved
+  rather than regressed.
+- Full-input command: `python -m vision.cv.annotate_cli
+  112125_14_ARCH-3.pdf debug_output/drafting_cleaned_full.pdf --preview
+  debug_output/drafting_cleaned_full.png --debug-dir
+  debug_output/drafting_cleaned_full_intermediates` with
+  `PYTHONPATH=apps/api/src`.
+- Full run: 362.0 s; 124 walls, 4 doors, 7 windows, 8/8 labeled rooms, and 11
+  gaps. Full suite: 148 passed.
+
+### Filled wall and scale-aware window masks retained
+
+- Walls now render and export as filled face-to-face polygons using the larger
+  of measured and paired-face thickness. Windows render after walls as filled
+  blue spans aligned to their supporting wall; the independent wall mask is
+  cut out wherever the window mask owns the footprint.
+- Window candidates require seeded-room exterior/hull context. The physical
+  search ceiling increased from 220 to 340 px because a common 5'-0" window is
+  about 250 px at the configured 1/4" scale and 200 DPI. This recovered two
+  correct bottom windows that the old ceiling categorically excluded.
+- Exported intermediates:
+  `05_drafting_removal/{drafting_mask,structural_protection_mask,cleaned_binary,cleaned_image}.png`
+  and `13_semantic_masks/{wall_mask,door_mask,window_mask,room_region_mask,combined_class_mask}.png`.
+
+| Metric | Previous final | Drafting-cleaned final | Change |
+|---|---:|---:|---:|
+| Macro IoU | 0.1880 | 0.2664 | +0.0784 |
+| Macro F1 | 0.2831 | 0.3965 | +0.1134 |
+| Foreground IoU | 0.5623 | 0.6088 | +0.0465 |
+| Wall IoU | 0.1112 | 0.1987 | +0.0875 |
+| Wall boundary F1 | 0.2587 | 0.3345 | +0.0758 |
+| Door IoU | 0.1059 | 0.1233 | +0.0174 |
+| Window IoU | 0.0415 | 0.1954 | +0.1539 |
+| Room IoU | 0.4934 | 0.5481 | +0.0547 |
+
+- Final output: `debug_output/drafting_cleaned_full.{pdf,png}`.
+- Metric report: `evaluation_output/drafting_cleaned_full.json`.
+- Remaining differences: the seed-only room stage still lacks an explicit
+  stair/circulation polygon; only two of the three lower exterior windows are
+  well localized; several top/right window proposals are false; four detected
+  doors do not cover every reference swing; and wall recall is 0.2530. Further
+  reliable separation of those cases needs additional plan examples or
+  learned/schedule-aware class evidence rather than coordinates from this
+  reference image.

@@ -3,7 +3,7 @@ import numpy as np
 
 from vision.cv import window_detection
 from vision.cv.config import PipelineConfig
-from vision.cv.models import Gap, LineSegment, PipelineState, Point, Wall
+from vision.cv.models import Gap, LineSegment, PipelineState, Point, Room, Wall
 
 
 def wall(wid, x1, y1, x2, y2, thickness=10.0):
@@ -28,7 +28,7 @@ def solid_wall_binary(y_center=200, half=5, x0=100, x1=500, shape=(400, 600)):
 
 
 def make_state(walls, lines=(), binary=None, gaps=()):
-    state = PipelineState(config=PipelineConfig())
+    state = PipelineState(config=PipelineConfig(window_min_parallel_lines=2))
     state.walls = list(walls)
     state.classified_lines = list(lines)
     state.binary = binary if binary is not None else solid_wall_binary()
@@ -40,8 +40,9 @@ def make_state(walls, lines=(), binary=None, gaps=()):
 
 def test_inner_line_window():
     w = wall("W0001", 100, 200, 500, 200)
-    inner = seg(280, 200, 330, 200)  # 50 px inner line on the centerline
-    state = make_state([w], [inner])
+    inner_a = seg(280, 198, 330, 198, sid="a")
+    inner_b = seg(280, 202, 330, 202, sid="b")
+    state = make_state([w], [inner_a, inner_b])
     window_detection.run(state)
     assert len(state.windows) == 1
     win = state.windows[0]
@@ -50,6 +51,18 @@ def test_inner_line_window():
     window_gaps = [g for g in state.gaps if g.kind == "window"]
     assert len(window_gaps) == 1
     assert window_gaps[0].wall_break_score == 1.0
+
+
+def test_common_five_foot_window_is_within_search_scale():
+    config = PipelineConfig()
+    assert config.window_gap_min_px < 250 < config.window_gap_max_px
+
+
+def test_single_inner_line_is_not_enough_frame_evidence():
+    w = wall("W0001", 100, 200, 500, 200)
+    state = make_state([w], [seg(280, 200, 330, 200)])
+    window_detection.run(state)
+    assert state.windows == []
 
 
 def test_inner_line_outside_extent_no_window():
@@ -100,8 +113,9 @@ def test_strategy_b_skipped_when_a_found():
     binary = solid_wall_binary()
     binary[:, 380:420] = 0  # face gap that B would find
     w = wall("W0001", 100, 200, 500, 200)
-    inner = seg(180, 200, 230, 200)  # A finds this
-    state = make_state([w], [inner], binary)
+    inner_a = seg(180, 198, 230, 198, sid="a")
+    inner_b = seg(180, 202, 230, 202, sid="b")
+    state = make_state([w], [inner_a, inner_b], binary)
     window_detection.run(state)
     assert len(state.windows) == 1
     assert abs(state.windows[0].position.x - 205) < 5
@@ -148,3 +162,19 @@ def test_windows_do_not_split_walls():
     state = make_state([w], [], binary)
     window_detection.run(state)
     assert len(state.walls) == 1
+
+
+def test_exterior_context_requires_room_hull_boundary():
+    state = make_state([])
+    state.rooms = [Room(
+        "R1", [Point(100, 100), Point(500, 100), Point(500, 300), Point(100, 300)],
+        area=80000,
+    )]
+    exterior = wall("WE", 100, 100, 500, 100)
+    interior = wall("WI", 100, 200, 500, 200)
+    assert window_detection._has_exterior_context(
+        exterior, Point(300, 100), state, state.config
+    )
+    assert not window_detection._has_exterior_context(
+        interior, Point(300, 200), state, state.config
+    )

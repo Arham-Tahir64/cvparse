@@ -33,9 +33,9 @@ logger = logging.getLogger("flowbuildr.cv.annotate_pdf")
 COLORS = {
     "wall": (0.84, 0.15, 0.16),          # #d62728 red
     "wall_low_conf": (1.0, 0.50, 0.05),  # #ff7f0e orange
-    "junction": (0.12, 0.47, 0.71),      # #1f77b4 blue
+    "junction": (0.09, 0.75, 0.81),      # #17becf cyan
     "door": (0.17, 0.63, 0.17),          # #2ca02c green
-    "window": (0.55, 0.34, 0.29),        # #8c564b brown-orange
+    "window": (0.12, 0.47, 0.71),        # #1f77b4 blue
     "gap_door": (0.09, 0.75, 0.81),      # #17becf cyan
     "gap_window": (0.89, 0.47, 0.76),    # #e377c2 pink
     "room_fill": (0.68, 0.78, 0.91),     # #aec7e8 light blue
@@ -129,17 +129,28 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         shape.draw_rect(rect)
         shape.finish(color=color, width=0.8, dashes="[3 3] 0")
 
-    # walls
-    for wall in result.walls:
+    def wall_band(wall):
         cl = wall.centerline
+        dx, dy = cl.end.x - cl.start.x, cl.end.y - cl.start.y
+        length = max(1e-6, math.hypot(dx, dy))
+        nx, ny = -dy / length, dx / length
+        half = max(wall.thickness, wall.visual_thickness) / 2.0
+        return [
+            pt(cl.start.x + nx * half, cl.start.y + ny * half),
+            pt(cl.end.x + nx * half, cl.end.y + ny * half),
+            pt(cl.end.x - nx * half, cl.end.y - ny * half),
+            pt(cl.start.x - nx * half, cl.start.y - ny * half),
+        ]
+
+    # Walls are filled face-to-face footprints, not skeleton strokes.
+    for wall in result.walls:
         low = wall.merge_confidence < _LOW_CONFIDENCE
-        shape.draw_line(pt(cl.start.x, cl.start.y), pt(cl.end.x, cl.end.y))
+        points = wall_band(wall)
+        color = COLORS["wall_low_conf"] if low else COLORS["wall"]
+        shape.draw_polyline(points + [points[0]])
         shape.finish(
-            color=COLORS["wall_low_conf"] if low else COLORS["wall"],
-            # PyMuPDF's width is the complete stroke width. visual_thickness
-            # is likewise the complete measured wall band, not a radius.
-            width=max(0.8, wall.visual_thickness * scale),
-            stroke_opacity=0.85,
+            color=color, fill=color, width=0.2,
+            stroke_opacity=0.85, fill_opacity=0.85, closePath=True,
         )
 
     # junctions
@@ -165,14 +176,34 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         shape.draw_line(hinge, swing)
         shape.finish(color=COLORS["door"], width=1.2)
 
-    # windows: tick perpendicular-ish marker at the window position
+    # Windows own a filled span within their supporting wall and draw after the
+    # wall footprint, keeping the classes visually and semantically separate.
+    wall_lookup = {wall.id: wall for wall in result.walls}
+    for wall in result.walls:
+        for source_id in wall.source_ids:
+            wall_lookup.setdefault(source_id, wall)
     for window in result.windows:
-        half = window.width * scale / 2.0
-        c = pt(window.position.x, window.position.y)
-        shape.draw_line(fitz.Point(c.x - half, c.y), fitz.Point(c.x + half, c.y))
-        shape.finish(color=COLORS["window"], width=2.5, stroke_opacity=0.9)
-        shape.draw_circle(c, 2.0)
-        shape.finish(color=COLORS["window"], fill=COLORS["window"], width=0.5)
+        wall = wall_lookup.get(window.wall_id)
+        if wall is None:
+            continue
+        cl = wall.centerline
+        length = max(1e-6, cl.length)
+        ux, uy = (cl.end.x - cl.start.x) / length, (cl.end.y - cl.start.y) / length
+        nx, ny = -uy, ux
+        along = window.width / 2.0
+        across = max(wall.thickness, wall.visual_thickness) / 2.0
+        cx, cy = window.position.x, window.position.y
+        points = [
+            pt(cx - ux * along + nx * across, cy - uy * along + ny * across),
+            pt(cx + ux * along + nx * across, cy + uy * along + ny * across),
+            pt(cx + ux * along - nx * across, cy + uy * along - ny * across),
+            pt(cx - ux * along - nx * across, cy - uy * along - ny * across),
+        ]
+        shape.draw_polyline(points + [points[0]])
+        shape.finish(
+            color=COLORS["window"], fill=COLORS["window"], width=0.3,
+            stroke_opacity=0.9, fill_opacity=0.65, closePath=True,
+        )
 
     shape.commit()
 

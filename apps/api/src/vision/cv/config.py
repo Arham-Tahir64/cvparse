@@ -71,6 +71,17 @@ class PipelineConfig:
     grid_min_length_px: float = 200.0          # rule 5 length floor
     grid_min_gap_runs: int = 3                 # rule 5 minimum background runs
 
+    # --- Drafting removal (proposal pass -> cleaned structural pass) ---
+    drafting_segment_pad_px: int = 2
+    drafting_endpoint_radius_px: int = 9
+    drafting_extension_endpoint_px: float = 14.0
+    drafting_extension_max_length_px: float = 180.0
+    drafting_extension_angle_tol_deg: float = 18.0
+    drafting_text_pad_px: int = 3
+    drafting_wall_protect_pad_px: int = 3
+    drafting_wall_protect_min_confidence: float = 0.55
+    drafting_repair_gap_px: int = 11
+
     # --- Module 05: Wall Extraction ---
     wall_thickness_min_px: float = 5.0
     wall_thickness_max_px: float = 80.0        # also max face separation for pairing
@@ -127,13 +138,21 @@ class PipelineConfig:
 
     # --- Module 08: Windows ---
     window_gap_min_px: float = 25.0
-    window_gap_max_px: float = 220.0
+    # 5'-0" windows at 1/4" scale and 200 DPI are about 250 px; leave room
+    # for frame/trim extent and modest scale variation.
+    window_gap_max_px: float = 340.0
     window_gap_scan_half_band_px: int = 5
     window_gap_side_sample_px: int = 12
     window_gap_min_side_fill: float = 0.18
     window_inner_line_perp_frac: float = 0.6   # max perp dist from centerline / wall thickness
     window_inner_line_angle_tol_deg: float = 5.0
     window_merge_overlap_ratio: float = 0.5    # candidates overlapping more than this merge
+    # Clean-pass collinear merging can collapse repeated glazing strokes into
+    # one span, so exterior topology supplies the second independent cue.
+    window_min_parallel_lines: int = 1
+    window_require_exterior_context: bool = True
+    window_exterior_sample_px: float = 18.0
+    window_exterior_hull_dist_px: float = 80.0
     window_scan_min_samples: int = 20
 
     # --- Module 09: Rooms ---

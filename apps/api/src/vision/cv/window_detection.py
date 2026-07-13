@@ -25,7 +25,9 @@ MODULE = "08_window_detection"
 
 def run(state: PipelineState) -> PipelineState:
     config = state.config
-    binary = state.binary_masked if state.binary_masked is not None else state.binary
+    binary = (state.binary_cleaned if state.binary_cleaned is not None
+              else state.binary_masked if state.binary_masked is not None
+              else state.binary)
 
     window_id_gen = IdGenerator("WD")
     gap_id_gen = IdGenerator("G", start=len(state.gaps) + 1)
@@ -81,7 +83,10 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
     angle_tol = math.radians(config.window_inner_line_angle_tol_deg)
     max_perp = config.window_inner_line_perp_frac * wall.thickness
 
-    intervals: list[tuple[float, float]] = []
+    ux = (cl.end.x - cl.start.x) / max(1e-6, cl.length)
+    uy = (cl.end.y - cl.start.y) / max(1e-6, cl.length)
+    nx, ny = -uy, ux
+    intervals: list[tuple[float, float, float]] = []
     for i in idx:
         seg = candidates[i]
         if angle_diff_rad(seg.angle_rad, cl.angle_rad) > angle_tol:
@@ -93,12 +98,18 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
         t0, t1 = sorted((t0, t1))
         if t0 < 0.0 or t1 > 1.0:
             continue
-        intervals.append((t0, t1))
+        offset = ((seg.midpoint.x - cl.midpoint.x) * nx +
+                  (seg.midpoint.y - cl.midpoint.y) * ny)
+        intervals.append((t0, t1, offset))
 
-    merged = _merge_intervals(intervals, config.window_merge_overlap_ratio)
+    merged = _frame_clusters(
+        intervals, config.window_merge_overlap_ratio, config.window_min_parallel_lines
+    )
     results = []
     for t0, t1 in merged:
         center = point_at_param(cl.start, cl.end, (t0 + t1) / 2.0)
+        if not _has_exterior_context(wall, center, state, config):
+            continue
         width = (t1 - t0) * cl.length
         window = Window(id=window_id_gen(), position=center, width=width, wall_id=wall.id)
         results.append(window)
@@ -106,21 +117,39 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
     return results
 
 
-def _merge_intervals(intervals, overlap_ratio_threshold):
+def _frame_clusters(intervals, overlap_ratio_threshold, min_parallel_lines):
     if not intervals:
         return []
-    intervals = sorted(intervals)
-    merged = [list(intervals[0])]
-    for t0, t1 in intervals[1:]:
-        last = merged[-1]
-        overlap = min(last[1], t1) - max(last[0], t0)
-        shorter = min(last[1] - last[0], t1 - t0)
-        if shorter > 0 and overlap / shorter > overlap_ratio_threshold:
-            last[1] = max(last[1], t1)
-            last[0] = min(last[0], t0)
+    clusters: list[list[tuple[float, float, float]]] = []
+    for candidate in sorted(intervals):
+        t0, t1, _ = candidate
+        match = None
+        for cluster in clusters:
+            c0 = min(item[0] for item in cluster)
+            c1 = max(item[1] for item in cluster)
+            overlap = min(c1, t1) - max(c0, t0)
+            shorter = min(c1 - c0, t1 - t0)
+            if shorter > 0 and overlap / shorter > overlap_ratio_threshold:
+                match = cluster
+                break
+        if match is None:
+            clusters.append([candidate])
         else:
-            merged.append([t0, t1])
-    return [(a, b) for a, b in merged]
+            match.append(candidate)
+
+    output = []
+    for cluster in clusters:
+        distinct_offsets = []
+        for _, _, offset in cluster:
+            if all(abs(offset - existing) >= 1.0 for existing in distinct_offsets):
+                distinct_offsets.append(offset)
+        if len(distinct_offsets) < min_parallel_lines:
+            continue
+        output.append((
+            min(item[0] for item in cluster),
+            max(item[1] for item in cluster),
+        ))
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +206,9 @@ def _face_gap_windows(wall, binary, config, window_id_gen, gap_id_gen, state):
             fill = _side_fill(cl, ts[i], ts[j], wall, binary, config, (ux, uy), (nx, ny))
             if fill is not None:
                 center = point_at_param(cl.start, cl.end, t_mid)
+                if not _has_exterior_context(wall, center, state, config):
+                    i = j + 1
+                    continue
                 window = Window(
                     id=window_id_gen(), position=center, width=run_px, wall_id=wall.id
                 )
@@ -184,6 +216,46 @@ def _face_gap_windows(wall, binary, config, window_id_gen, gap_id_gen, state):
                 state.gaps.append(_gap_record(gap_id_gen(), wall, center, run_px, fill))
         i = j + 1
     return results
+
+
+def _has_exterior_context(wall, center, state, config) -> bool:
+    if not config.window_require_exterior_context or not state.rooms:
+        return True
+    cl = wall.centerline
+    length = max(1e-6, cl.length)
+    ux = (cl.end.x - cl.start.x) / length
+    uy = (cl.end.y - cl.start.y) / length
+    nx, ny = -uy, ux
+    offset = wall.thickness / 2.0 + config.window_exterior_sample_px
+    samples = [
+        (center.x + nx * offset, center.y + ny * offset),
+        (center.x - nx * offset, center.y - ny * offset),
+    ]
+
+    def in_any_room(point):
+        for room in state.rooms:
+            if len(room.polygon) < 3:
+                continue
+            contour = np.asarray(
+                [[p.x, p.y] for p in room.polygon], dtype=np.float32
+            )
+            if cv2.pointPolygonTest(contour, point, False) >= 0:
+                return True
+        return False
+
+    inside = [in_any_room(point) for point in samples]
+    if inside[0] == inside[1]:
+        return False
+
+    hull_points = np.asarray(
+        [[point.x, point.y] for room in state.rooms for point in room.polygon],
+        dtype=np.float32,
+    )
+    if len(hull_points) < 3:
+        return False
+    hull = cv2.convexHull(hull_points.reshape(-1, 1, 2))
+    distance = abs(cv2.pointPolygonTest(hull, (center.x, center.y), True))
+    return distance <= config.window_exterior_hull_dist_px
 
 
 def _door_param_ranges(wall, cl, state):

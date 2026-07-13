@@ -49,13 +49,13 @@ def test_annotate_image_as_pdf(monkeypatch):
     assert len(drawings) > len(result.walls)  # walls + rooms + legend etc.
     wall_drawings = [
         drawing for drawing in drawings
-        if drawing["color"] == pytest.approx((0.84, 0.15, 0.16), abs=0.01)
-        and drawing["width"] != pytest.approx(3.0, abs=0.01)  # legend swatch
+        if drawing["fill_opacity"] == pytest.approx(0.85, abs=0.01)
+        and (
+            drawing["fill"] == pytest.approx((0.84, 0.15, 0.16), abs=0.01)
+            or drawing["fill"] == pytest.approx((1.0, 0.5, 0.05), abs=0.01)
+        )
     ]
-    expected_widths = sorted(max(0.8, wall.visual_thickness * 72 / 200)
-                             for wall in result.walls)
-    actual_widths = sorted(drawing["width"] for drawing in wall_drawings)
-    assert actual_widths == pytest.approx(expected_widths, abs=0.01)
+    assert len(wall_drawings) == len(result.walls)
     door_sectors = [
         drawing for drawing in drawings
         if drawing["fill"] == pytest.approx((0.17, 0.63, 0.17), abs=0.01)
@@ -96,7 +96,7 @@ def test_skip_stage_records_message():
         config=PipelineConfig(
             hough_circles_param2=25.0, door_arc_min_radius_px=20.0,
         ),
-        skip_stages=("10_ocr_labeling",),
+        skip_stages=("14_ocr_labeling",),
     )
-    assert any("10_ocr_labeling" in m for m in state.debug.messages)
-    assert "10_ocr_labeling" not in state.debug.stage_timings
+    assert any("14_ocr_labeling" in m for m in state.debug.messages)
+    assert "14_ocr_labeling" not in state.debug.stage_timings

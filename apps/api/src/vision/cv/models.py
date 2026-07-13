@@ -237,6 +237,17 @@ class PipelineState:
     # Convex envelope of semantic room regions, expanded to include wall bands.
     # Module 04 uses it to reject drafting geometry outside the inferred plan.
     semantic_plan_mask: Optional[np.ndarray] = None
+    # Dedicated pre-segmentation drafting removal products.
+    drafting_mask: Optional[np.ndarray] = None
+    structural_protection_mask: Optional[np.ndarray] = None
+    binary_cleaned: Optional[np.ndarray] = None
+    cleaned_image: Optional[np.ndarray] = None
+    # Explicit semantic masks produced after detection for inspection/export.
+    wall_mask: Optional[np.ndarray] = None
+    door_mask: Optional[np.ndarray] = None
+    window_mask: Optional[np.ndarray] = None
+    room_region_mask: Optional[np.ndarray] = None
+    combined_class_mask: Optional[np.ndarray] = None
     dpi: int = 200
     page_number: int = 0
     raw_lines: list[LineSegment] = field(default_factory=list)

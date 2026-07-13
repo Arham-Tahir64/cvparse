@@ -84,7 +84,9 @@ def _semantic_raster_rooms(state, image_area, id_gen) -> list[Room]:
     regions from the remaining free-space components.
     """
     config = state.config
-    binary = state.binary_masked if state.binary_masked is not None else state.binary
+    binary = (state.binary_cleaned if state.binary_cleaned is not None
+              else state.binary_masked if state.binary_masked is not None
+              else state.binary)
     core = state.structural_core_mask
     if binary is None or core is None or not state.raw_texts:
         return []
