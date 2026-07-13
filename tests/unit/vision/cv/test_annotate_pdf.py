@@ -2,6 +2,7 @@
 import cv2
 import fitz
 import numpy as np
+import pytest
 
 from vision.cv import ocr_engines, pipeline
 from vision.cv.annotate_pdf import annotate_image_as_pdf, annotate_pdf_page
@@ -42,6 +43,15 @@ def test_annotate_image_as_pdf(monkeypatch):
     assert doc.page_count == 1
     drawings = doc[0].get_drawings()
     assert len(drawings) > len(result.walls)  # walls + rooms + legend etc.
+    wall_drawings = [
+        drawing for drawing in drawings
+        if drawing["color"] == pytest.approx((0.84, 0.15, 0.16), abs=0.01)
+        and drawing["width"] != pytest.approx(3.0, abs=0.01)  # legend swatch
+    ]
+    expected_widths = sorted(max(0.8, wall.visual_thickness * 72 / 200)
+                             for wall in result.walls)
+    actual_widths = sorted(drawing["width"] for drawing in wall_drawings)
+    assert actual_widths == pytest.approx(expected_widths, abs=0.01)
     text = doc[0].get_text()
     assert "walls" in text  # legend
     assert "KITCHEN" in text  # room label

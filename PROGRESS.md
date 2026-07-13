@@ -45,6 +45,15 @@
 | Window | 0.0311 | 0.0609 | 0.0597 | 0.0603 | 0.1325 |
 | Room | 0.0291 | 0.3775 | 0.0306 | 0.0566 | 0.3782 |
 
+### 1. Render the full measured wall thickness
+
+- Issue: PDF annotations rendered wall strokes at half of `visual_thickness`, although that field and PyMuPDF's stroke width both represent full width. Correct detections therefore covered only half of each reference wall band.
+- Hypothesis: rendering the complete measured width should improve wall overlap and boundary agreement without changing detector behavior.
+- Files: `apps/api/src/vision/cv/annotate_pdf.py`, `tests/unit/vision/cv/test_annotate_pdf.py`, `PROGRESS.md`
+- Commands/tests: focused renderer tests (3 passed); full suite (131 passed); unchanged CLI command writing `debug_output/wall_width.{pdf,png}`; semantic evaluation writing `evaluation_output/wall_width.json`.
+- Objects/runtime: unchanged at 175 walls, 0 doors, 53 windows, 1 unlabeled room; 375.2 s.
+- Result: retained. Wall IoU 0.0634 -> 0.1095 (+72.7%), wall F1 0.1192 -> 0.1974, wall boundary F1 0.1474 -> 0.2310. Foreground IoU 0.0833 -> 0.1074; macro IoU 0.0309 -> 0.0449 and macro F1 0.0590 -> 0.0831.
+
 ## Remaining limitations
 
 - The supplied ground truth is a raster overlay, not vector/object annotations. Connected components are therefore only an object-count proxy, especially for the connected wall network.

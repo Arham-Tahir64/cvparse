@@ -136,7 +136,9 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         shape.draw_line(pt(cl.start.x, cl.start.y), pt(cl.end.x, cl.end.y))
         shape.finish(
             color=COLORS["wall_low_conf"] if low else COLORS["wall"],
-            width=max(0.8, wall.visual_thickness * scale * 0.5),
+            # PyMuPDF's width is the complete stroke width. visual_thickness
+            # is likewise the complete measured wall band, not a radius.
+            width=max(0.8, wall.visual_thickness * scale),
             stroke_opacity=0.85,
         )
 
