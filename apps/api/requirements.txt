@@ -1,0 +1,19 @@
+# CV pipeline - locked tech stack (see .agents/cv_pipeline/CLAUDE.md)
+numpy
+opencv-python>=4.8
+pymupdf
+pylsd-nova           # LSD fallback when OpenCV's detector is unavailable
+scikit-image
+shapely
+networkx
+scipy
+scikit-learn         # DBSCAN only
+fastapi
+python-multipart
+httpx                # TestClient transport
+
+# OCR engines (at least one required for module 10; module 03 degrades
+# gracefully without one)
+paddleocr>=3         # primary (3.x API; loaded with enable_mkldnn=False)
+paddlepaddle
+pytesseract          # fallback; needs the tesseract binary installed
