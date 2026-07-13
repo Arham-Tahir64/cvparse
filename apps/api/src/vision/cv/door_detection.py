@@ -29,6 +29,13 @@ def run(state: PipelineState) -> PipelineState:
     binary = (state.binary_cleaned if state.binary_cleaned is not None
               else state.binary_masked if state.binary_masked is not None
               else state.binary)
+    # Structural cleanup intentionally removes thin annotation-like strokes,
+    # which can include a valid door leaf. Use the original in-plan raster only
+    # for leaf evidence; wall continuation and opening checks stay on the
+    # cleaned structural binary so dimensions cannot manufacture a doorway.
+    leaf_binary = state.binary if state.binary is not None else binary
+    if state.semantic_plan_mask is not None:
+        leaf_binary = cv2.bitwise_and(leaf_binary, state.semantic_plan_mask)
 
     erased = _erase_walls(binary, state.walls, config)
     circles = _hough_circles(erased, config)
@@ -51,6 +58,7 @@ def run(state: PipelineState) -> PipelineState:
         for wall in _nearby_walls(Point(cx, cy), state.walls, config):
             geometry = _candidate_geometry(
                 binary, wall, cx, cy, radius, start_angle, end_angle, config,
+                leaf_binary=leaf_binary,
             )
             if geometry is not None and (best is None or geometry[0] > best[0]):
                 best = (*geometry, wall)
@@ -220,6 +228,7 @@ def _candidate_geometry(
     start_angle: float,
     end_angle: float,
     config,
+    leaf_binary: np.ndarray | None = None,
 ):
     """Validate a circle proposal using wall-opening and leaf evidence.
 
@@ -281,7 +290,10 @@ def _candidate_geometry(
         binary, hinge, ux, uy, opening_sign,
         inset, max(inset + 8.0, radius * 0.78), wall.thickness,
     )
-    leaf_support = _radial_ink_support(binary, cx, cy, radius, leaf_angle)
+    leaf_support = _radial_ink_support(
+        leaf_binary if leaf_binary is not None else binary,
+        cx, cy, radius, leaf_angle,
+    )
     if continuation < config.door_min_wall_continuation:
         return None
     if opening > config.door_max_opening_support:

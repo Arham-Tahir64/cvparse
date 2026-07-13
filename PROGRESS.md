@@ -728,3 +728,50 @@ Proposed coupled change:
   measure each detected door against the truth, audit rejected arc candidates,
   and test whether wall-gap seeded arc assembly can improve recall without
   promoting fixtures or room symbols.
+
+### Cycle 3 retained: preserve door-leaf evidence through structural cleanup
+
+- Root cause: door validation used the drafting-cleaned raster for every
+  feature. That is correct for wall continuity and opening evidence, but the
+  same cleanup can erase a legitimate thin door leaf. One audited proposal had
+  0.00 cleaned leaf support versus 0.35 in the original in-plan raster and was
+  therefore rejected before geometry export.
+- Door validation now uses two evidence streams. Wall continuation and opening
+  checks remain on the cleaned structural raster; only radial leaf support is
+  measured on the original binary clipped to the semantic plan. This recovers
+  leaves without allowing exterior dimensions to manufacture door openings.
+- A measured snap-radius sweep at opening support 0.52 selected 70 px: direct
+  door IoU was 0.1756 / 0.2137 / 0.2116 / **0.2234** / 0.2037 / 0.2037 for
+  55 / 60 / 65 / 70 / 75 / 80 px. The 75-80 px variants were rejected because
+  distant fixture/arc candidates raised false positives by 1,034 pixels.
+- A second sweep selected maximum opening support 0.52 as the first stable
+  threshold: 0.42 produced 7 doors at direct IoU 0.1980; 0.48 produced 8 at
+  0.1903; 0.52-0.60 produced 9 at 0.2234. The existing uninterrupted-wall
+  rejection test remains in force, and a new regression test verifies original
+  leaf evidence can survive structural cleanup.
+- The two registered structural cases are unchanged: recreation room wall IoU
+  0.7169, room IoU 0.9158, barrier pixels 0 vertical / 2 horizontal; missing-
+  wall crop wall IoU 0.4528, boundary F1 0.7394, room IoU 0.6593. Thus door
+  recovery does not trade away measurement rejection or real-wall retention.
+- Full rendered results versus Cycle 2: wall IoU 0.6359 -> 0.6386, door IoU
+  0.1344 -> 0.1529, window IoU 0.1979 -> 0.1868, room IoU 0.7744 -> 0.7752,
+  macro IoU 0.4356 -> 0.4384, foreground IoU 0.8514 -> 0.8528. The window
+  detector mask is unchanged (direct IoU 0.2510); its rendered decline is a
+  colour-ownership interaction with the five additional door overlays and is
+  the next cycle's rendering/overlap issue.
+- Tests: 161 passed. Full uncached run: 381.5 s, 116 walls, 9 doors, 7 windows,
+  8/8 rooms, and 16 gaps. Commands: `python -m pytest -q`;
+  `python -m vision.cv.annotate_cli ...`; `tools/evaluate_annotation.py ...`;
+  `debug_output/evaluate_focus_regions.py`. Output:
+  `debug_output/highlight_cycle3_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle3_full.json`; intermediates:
+  `debug_output/highlight_cycle3_full_intermediates/`; seven-layer crops:
+  `debug_output/focus_cycle3_full/`.
+
+### Cycle 4 goal: eliminate semantic overlay ownership regressions
+
+- Whole-output comparison shows direct window geometry did not change in Cycle
+  3, while rendered window IoU fell 0.0111 after additional doors were drawn.
+  Inspect PDF/preview draw order and semantic ownership so overlapping door,
+  window, wall, and room classes are exported consistently with the reference,
+  without changing detector masks or either highlighted structural result.

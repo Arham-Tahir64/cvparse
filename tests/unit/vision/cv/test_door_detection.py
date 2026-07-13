@@ -176,3 +176,20 @@ def test_detected_door_exports_ordered_swing_arc():
     assert len(state.doors) == 1
     assert len(state.doors[0].swing_arc) >= 12
     assert state.doors[0].confidence > 0
+
+
+def test_original_leaf_evidence_survives_structural_cleanup():
+    source = np.zeros((400, 600), np.uint8)
+    source[196:205, 50:550] = 255
+    open_wall(source, 300, 50)
+    draw_arc(source, 300, 200, 50, 0, 90)
+    cleaned = source.copy()
+    # Cleanup removed the radial leaf but retained enough swing arc for Hough.
+    cleaned[205:248, 297:304] = 0
+    state = make_state([wall("W0001", 50, 200, 550, 200)], source)
+    state.binary_cleaned = cleaned
+
+    door_detection.run(state)
+
+    assert len(state.doors) == 1
+    assert state.doors[0].confidence > 0
