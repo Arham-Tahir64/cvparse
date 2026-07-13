@@ -243,6 +243,9 @@ class PipelineState:
     binary_cleaned: Optional[np.ndarray] = None
     cleaned_image: Optional[np.ndarray] = None
     # Explicit semantic masks produced after detection for inspection/export.
+    wall_boundary_mask: Optional[np.ndarray] = None
+    wall_polygon_mask: Optional[np.ndarray] = None
+    wall_repaired_mask: Optional[np.ndarray] = None
     wall_mask: Optional[np.ndarray] = None
     door_mask: Optional[np.ndarray] = None
     window_mask: Optional[np.ndarray] = None

@@ -325,3 +325,128 @@ destructive removal.
   reliable separation of those cases needs additional plan examples or
   learned/schedule-aware class evidence rather than coordinates from this
   reference image.
+
+## Structure-aware wall-region reconstruction (continued objective)
+
+### Failure analysis before the architectural change
+
+- The current semantic wall mask is not reconstructed from wall boundaries.
+  It draws one thick OpenCV centerline for every detected `Wall`. Paired walls
+  are truncated to the overlap of two LSD segments, each segment can be used
+  by only one pair, and independent strokes are never joined topologically.
+  This clips corners and T-junctions and loses a long wall whenever either
+  face is fragmented or missing.
+- The single-face fallback has no estimate of which side contains the wall
+  mass. Its line width is reused as the complete wall thickness, so it cannot
+  recover the region between an observed face and an absent opposite face.
+- On the retained full run the reference contains 29,500 wall pixels at
+  evaluation resolution, while the generated annotation contains 15,535.
+  Recall is 0.2530. Of the 22,036 false-negative pixels, 49.8% lie within
+  8 px and 67.7% within 16 px of a predicted wall, which is strong evidence of
+  clipped thickness/endpoints; the remaining large components are whole
+  missing perimeter/interior runs, not a color-rendering artifact.
+
+### Proposed replacement
+
+1. Preserve detected wall boundaries as a dedicated intermediate mask instead
+   of reducing them immediately to independent centerline strokes.
+2. Rasterize paired faces as closed quadrilateral polygons spanning the actual
+   face-to-face interval. Extend polygon ends only where a nearby collinear or
+   orthogonal wall supplies junction support.
+3. Build a room-boundary topology scaffold from the already detected semantic
+   free-space regions. Admit scaffold pixels only where directional structural
+   ink or a paired wall corridor supplies evidence, preventing furniture and
+   open-room boundaries from becoming walls.
+4. Repair the union with directional, thickness-bounded gap closure and local
+   junction hulls. Explicit door and window ownership masks are subtracted
+   after reconstruction so openings remain intact.
+5. Export detected boundaries, reconstructed polygons, repaired wall mask,
+   and final combined annotation, and retain the redesign only if wall recall
+   and IoU improve without a disproportionate precision or opening regression.
+
+This replaces stroke rendering with evidence-gated region reconstruction; it
+does not use global dilation or any coordinate from the reference annotation.
+
+### Wall-region reconstruction retained
+
+- The semantic stage now exports the detected source boundaries, clean-pass
+  filled wall polygons, a repaired wall mask, a separately inferred exterior
+  ring, and the final combined annotation. The repaired mask unions only two
+  independent structural signals: final wall polygons and high-confidence
+  paired corridors from the proposal pass. A 21 px directional close repairs
+  only gaps already bracketed by that union.
+- In Manhattan mode, proposal corridors must contain a 161 px horizontal or
+  vertical run. This is deliberately greater than twice the configured 80 px
+  maximum wall thickness, so a diagonal drafting band's cross-section cannot
+  survive while short clean-pass wall polygons remain intact.
+- The exterior pass uses room polygons as observed inner faces and scans the
+  cleaned binary outward for sustained parallel wall evidence on every side.
+  The full input measured left/right/top/bottom offsets of 67/34/35/67 px.
+  The second-largest supported thickness reconstructs the weak one-sided
+  faces as a consistent 67 px shell, bounded by the configured maximum. This
+  filled the exterior corners and runs without dilating interior walls.
+- A structural-core rectangularity gate (0.85 minimum; 0.900 on this input)
+  prevents that complete rectangular shell from being inferred on L-shaped
+  plans; those inputs retain polygon/corridor reconstruction only.
+- Door opening lines, the complete detected swing-sector mask, and window
+  spans are subtracted after reconstruction and gap repair. The PDF renderer
+  consumes the resulting RGBA wall-region mask instead of recreating partial
+  centerline polygons, so opening holes and fragmented contours survive the
+  export.
+
+### Iterations and rejected changes
+
+- Allowing a long LSD face to pair with multiple disjoint fragments increased
+  cached wall IoU from 0.1987 to 0.2348, but changed wall erasure/context and
+  regressed door IoU to 0.1138 and window IoU to 0.1381. That upstream change
+  was reverted; reconstruction is post-detection and preserves the proven
+  object proposals.
+- Unioning proposal corridors without Manhattan run filtering reached wall
+  IoU 0.3308 but retained a diagonal stair/drafting band. A 31 px directional
+  opening was still shorter than the band's cross-section. The thickness-
+  bounded 161 px gate removed it and increased the authoritative wall IoU to
+  0.5398.
+- Using only independently measured exterior offsets reached wall IoU 0.4197.
+  The shell-consistency rule recovered weak top/right faces and reached 0.5398
+  while also improving door, room, foreground, and macro metrics.
+
+### Authoritative full-input result
+
+- Commands: full suite `python -m pytest -q`; full CLI `python -m
+  vision.cv.annotate_cli 112125_14_ARCH-3.pdf
+  debug_output/wall_regions_full.pdf --preview
+  debug_output/wall_regions_full.png --debug-dir
+  debug_output/wall_regions_full_intermediates`; evaluator
+  `python tools/evaluate_annotation.py 112125_14_ARCH-3.pdf goal.png
+  debug_output/wall_regions_full.png --output
+  evaluation_output/wall_regions_full.json`.
+- Tests: 152 passed. Raw pipeline: 358.5 s, 124 walls, 4 doors, 7 windows,
+  8/8 labeled rooms, and 11 gaps.
+
+| Metric | Previous final | Wall-region final | Change |
+|---|---:|---:|---:|
+| Wall precision | 0.4805 | 0.6068 | +0.1263 |
+| Wall recall | 0.2530 | 0.8301 | +0.5771 |
+| Wall F1 | 0.3315 | 0.7011 | +0.3696 |
+| Wall IoU | 0.1987 | 0.5398 | +0.3411 |
+| Wall boundary F1 | 0.3345 | 0.5637 | +0.2292 |
+| Door IoU | 0.1233 | 0.1277 | +0.0044 |
+| Window IoU | 0.1954 | 0.2013 | +0.0059 |
+| Room IoU | 0.5481 | 0.5513 | +0.0032 |
+| Foreground IoU | 0.6088 | 0.6979 | +0.0891 |
+| Macro IoU | 0.2664 | 0.3550 | +0.0886 |
+
+- Residual audit: the wall class has 24,489 true-positive, 15,866 false-
+  positive, and 5,011 false-negative pixels at evaluation resolution. Of the
+  remaining misses, 51.1% are within 3 px and 70.2% within 8 px of the repaired
+  mask; the largest missed component is 590 px. There is no longer a large
+  missing exterior run. Overfill is concentrated around dense laundry/storage
+  cabinetry, short top-room partitions, and the mechanical-room interior.
+  More permissive corridor recovery raised those false positives, while local
+  erosion reduced wall coverage, so neither was retained.
+- Outputs: `debug_output/wall_regions_full.{pdf,png}` and
+  `evaluation_output/wall_regions_full.json`. Required intermediates are under
+  `debug_output/wall_regions_full_intermediates/13_semantic_masks/` as
+  `wall_boundaries.png`, `wall_polygons.png`, `exterior_wall_ring.png`,
+  `wall_repaired_mask.png`, `wall_mask.png`, `combined_class_mask.png`, and
+  `wall_error_vs_goal.png`.

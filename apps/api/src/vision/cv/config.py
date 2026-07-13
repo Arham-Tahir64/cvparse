@@ -105,6 +105,13 @@ class PipelineConfig:
     visual_thickness_max_px: float = 45.0
     visual_thickness_endpoint_margin_px: float = 40.0
     manhattan_snap_angle_deg: float = 5.0
+    # Must exceed twice wall_thickness_max_px so the cross-section of a thick
+    # diagonal drafting band cannot survive a Manhattan directional opening.
+    # Short walls remain represented by the clean-pass polygon mask.
+    wall_region_axis_min_run_px: int = 161
+    wall_region_gap_close_px: int = 21
+    exterior_wall_min_side_support: float = 0.45
+    exterior_wall_min_rectangularity: float = 0.85
 
     # --- Module 06: Junction Snapping ---
     junction_snap_radius_px: float = 12.0

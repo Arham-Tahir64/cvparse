@@ -90,6 +90,26 @@ def test_annotate_pdf_page(monkeypatch):
     doc.close()
 
 
+def test_reconstructed_wall_mask_renders_as_filled_region():
+    image = np.full((120, 180), 255, np.uint8)
+    wall_mask = np.zeros(image.shape, np.uint8)
+    wall_mask[40:80, 30:150] = 255
+    from vision.cv.models import CVTakeoffResult
+
+    out = annotate_image_as_pdf(
+        image, CVTakeoffResult(), dpi=72, wall_mask=wall_mask,
+    )
+    doc = fitz.open(stream=out, filetype="pdf")
+    pix = doc[0].get_pixmap(matrix=fitz.Matrix(1, 1), alpha=False)
+    rendered = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
+    doc.close()
+
+    # The complete rectangle interior is tinted wall red; surrounding pixels
+    # remain the white source rather than receiving a centerline/outline only.
+    assert rendered[60, 90, 0] > rendered[60, 90, 1]
+    assert np.all(rendered[15, 15] > 245)
+
+
 def test_skip_stage_records_message():
     state = pipeline.run_pipeline_state(
         image=synthetic_plan(),

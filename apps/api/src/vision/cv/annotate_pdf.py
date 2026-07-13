@@ -57,6 +57,7 @@ def annotate_pdf_page(
     page_number: int = 0,
     roi_mask: Optional[np.ndarray] = None,
     junctions: Optional[list] = None,
+    wall_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Overlay detections on the original PDF page; returns single-page PDF bytes."""
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -64,7 +65,10 @@ def annotate_pdf_page(
     doc.insert_pdf(src, from_page=page_number, to_page=page_number)
     src.close()
     page = doc[0]
-    _draw(page, result, scale=72.0 / dpi, roi_mask=roi_mask, junctions=junctions)
+    _draw(
+        page, result, scale=72.0 / dpi, roi_mask=roi_mask,
+        junctions=junctions, wall_mask=wall_mask,
+    )
     out = doc.tobytes()
     doc.close()
     return out
@@ -76,6 +80,7 @@ def annotate_image_as_pdf(
     dpi: int,
     roi_mask: Optional[np.ndarray] = None,
     junctions: Optional[list] = None,
+    wall_mask: Optional[np.ndarray] = None,
 ) -> bytes:
     """Create a PDF page from a raster image and overlay detections."""
     h, w = image.shape[:2]
@@ -85,13 +90,19 @@ def annotate_image_as_pdf(
     ok, buf = cv2.imencode(".png", image)
     if ok:
         page.insert_image(page.rect, stream=buf.tobytes())
-    _draw(page, result, scale=scale, roi_mask=roi_mask, junctions=junctions)
+    _draw(
+        page, result, scale=scale, roi_mask=roi_mask,
+        junctions=junctions, wall_mask=wall_mask,
+    )
     out = doc.tobytes()
     doc.close()
     return out
 
 
-def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None) -> None:
+def _draw(
+    page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None,
+    wall_mask: Optional[np.ndarray] = None,
+) -> None:
     shape = page.new_shape()
 
     def pt(x: float, y: float) -> fitz.Point:
@@ -107,6 +118,15 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
             color=COLORS["room_stroke"], fill=COLORS["room_fill"],
             fill_opacity=0.25, width=1.0, closePath=True,
         )
+
+    # A reconstructed raster wall region can contain fragmented contours and
+    # true opening holes that cannot be represented by independent PDF stroke
+    # polygons. Commit room fills first, then insert the transparent wall mask
+    # before drawing doors and windows on top.
+    if wall_mask is not None:
+        shape.commit()
+        _insert_wall_mask(page, wall_mask)
+        shape = page.new_shape()
 
     # structural ROI boundary
     if roi_mask is not None:
@@ -143,15 +163,16 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         ]
 
     # Walls are filled face-to-face footprints, not skeleton strokes.
-    for wall in result.walls:
-        low = wall.merge_confidence < _LOW_CONFIDENCE
-        points = wall_band(wall)
-        color = COLORS["wall_low_conf"] if low else COLORS["wall"]
-        shape.draw_polyline(points + [points[0]])
-        shape.finish(
-            color=color, fill=color, width=0.2,
-            stroke_opacity=0.85, fill_opacity=0.85, closePath=True,
-        )
+    if wall_mask is None:
+        for wall in result.walls:
+            low = wall.merge_confidence < _LOW_CONFIDENCE
+            points = wall_band(wall)
+            color = COLORS["wall_low_conf"] if low else COLORS["wall"]
+            shape.draw_polyline(points + [points[0]])
+            shape.finish(
+                color=color, fill=color, width=0.2,
+                stroke_opacity=0.85, fill_opacity=0.85, closePath=True,
+            )
 
     # junctions
     for junction in junctions or []:
@@ -219,6 +240,24 @@ def _draw(page, result: CVTakeoffResult, scale: float, roi_mask, junctions=None)
         )
 
     _draw_legend(page, result)
+
+
+def _insert_wall_mask(page, wall_mask: np.ndarray) -> None:
+    """Insert a full-page RGBA wall region while preserving mask holes."""
+    mask = np.where(wall_mask > 0, 217, 0).astype(np.uint8)  # 0.85 opacity
+    rgba = np.zeros((*wall_mask.shape[:2], 4), np.uint8)
+    red, green, blue = (round(channel * 255) for channel in COLORS["wall"])
+    rgba[..., 0] = blue
+    rgba[..., 1] = green
+    rgba[..., 2] = red
+    rgba[..., 3] = mask
+    ok, encoded = cv2.imencode(".png", rgba)
+    if not ok:
+        logger.warning("could not encode reconstructed wall mask")
+        return
+    page.insert_image(
+        page.rect, stream=encoded.tobytes(), overlay=True, keep_proportion=False,
+    )
 
 
 def _draw_legend(page, result: CVTakeoffResult) -> None:
