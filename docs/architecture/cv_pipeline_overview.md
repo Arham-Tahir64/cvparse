@@ -85,6 +85,18 @@ choice was made; revisit against real plans.
   tolerate_stage_errors=True)` records a failed stage in debug messages and
   continues; used by the annotate CLI so a `NoRoomsExtractedError` still
   yields an annotated PDF. The API route keeps the spec's fail-loud behavior.
+- **Parallel OCR (03/10, perf only).** OCR dominated runtime (335s of 379s
+  on the ARCH-3 sheet at 200 DPI), so `ocr_engines` gained spawn-based
+  worker pools: first-pass tiles fan out across `ocr_parallel_workers`
+  low-thread workers (Paddle's per-image thread scaling is poor, so many
+  small workers beat few big ones; `ocr_worker_cpu_threads`), and module
+  10's full-sheet read is submitted from module 03 to a dedicated
+  single-worker pool so it overlaps modules 04-13. Workers recreate the
+  same engine and thresholds are applied on collection, so results are
+  identical to the sequential path; injected/custom engines and any pool
+  failure fall back in-process. `enable_mkldnn=True` and higher
+  `cpu_threads` were benchmarked: oneDNN still crashes (paddlepaddle 3.3.1
+  on Windows) and thread count changed speed only, never results.
 
 ## Annotated-PDF debug output
 
