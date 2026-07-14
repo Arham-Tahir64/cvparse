@@ -48,16 +48,19 @@ def run(state: PipelineState) -> PipelineState:
             state.raw_texts = []
         else:
             executor = None
-            if ocr_engines.supports_worker_pool(engine):
+            if ocr_engines.supports_worker_pool(engine) and config.ocr_parallel_workers > 1:
                 executor = ocr_engines.get_executor(
-                    engine.name, config.ocr_parallel_workers
+                    engine.name, config.ocr_parallel_workers,
+                    config.ocr_worker_cpu_threads,
                 )
             # Second-pass OCR (module 10) depends only on state.image, which
-            # no later stage mutates. Submit it first - the full-sheet read is
-            # the longest single job - so it runs while modules 04-13 work.
+            # no later stage mutates. Submit it to a dedicated single-worker
+            # pool (engine-default threads: the full-sheet read is the longest
+            # single job) so it runs while modules 04-13 work without slowing
+            # the tile pool.
             if state.ocr_second_pass_future is None and executor is not None:
                 state.ocr_second_pass_future = ocr_engines.submit_read(
-                    engine.name, config.ocr_parallel_workers, state.image
+                    engine.name, 1, state.image
                 )
             state.raw_texts = run_ocr_first_pass(
                 state.image, engine, config.ocr_first_pass_confidence,

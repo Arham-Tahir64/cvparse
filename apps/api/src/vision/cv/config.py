@@ -240,8 +240,12 @@ class PipelineConfig:
     ocr_engine: Literal["paddle", "tesseract"] = "paddle"
     # OCR worker processes for tiled reads; results are identical to the
     # sequential path (same engine per image), only scheduling differs.
-    # <= 1 disables the pool and keeps everything in-process.
-    ocr_parallel_workers: int = 4
+    # <= 1 disables the pool and keeps everything in-process. Paddle's
+    # per-image thread scaling is poor, so many small workers beat few big
+    # ones; cpu_threads caps each tile worker's intra-op threads (None keeps
+    # the engine default; does not change results).
+    ocr_parallel_workers: int = 12
+    ocr_worker_cpu_threads: Optional[int] = 2
     ocr_first_pass_confidence: float = 0.3
     ocr_second_pass_confidence: float = 0.6
     room_label_vocab: tuple[str, ...] = field(default=DEFAULT_ROOM_LABEL_VOCAB)

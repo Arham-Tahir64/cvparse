@@ -20,9 +20,9 @@ logger = logging.getLogger("flowbuildr.cv.ocr")
 _ENGINE_CACHE: dict[str, Any] = {}
 _UNAVAILABLE = object()
 
-_EXECUTOR: Optional[ProcessPoolExecutor] = None
-_EXECUTOR_KEY: Optional[tuple[str, int]] = None
+_EXECUTORS: dict[tuple[str, int, Optional[int]], ProcessPoolExecutor] = {}
 _WORKER_PREFERRED = "paddle"
+_WORKER_CPU_THREADS: Optional[int] = None
 
 
 def get_engine(preferred: str = "paddle") -> Optional[Any]:
@@ -63,6 +63,9 @@ def _load_paddle():
         from paddleocr import PaddleOCR
     except ImportError:
         return None
+    # OCR worker processes may cap their intra-op threads so many workers
+    # share the CPU efficiently; thread count does not change results.
+    extra = {} if _WORKER_CPU_THREADS is None else {"cpu_threads": _WORKER_CPU_THREADS}
     try:  # PaddleOCR 3.x
         ocr = PaddleOCR(
             lang="en",
@@ -71,6 +74,7 @@ def _load_paddle():
             use_doc_unwarping=False,
             # paddlepaddle 3.x oneDNN backend crashes on some Windows CPUs
             enable_mkldnn=False,
+            **extra,
         )
     except (ValueError, TypeError):  # 2.x signature
         ocr = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
@@ -98,9 +102,10 @@ def supports_worker_pool(engine) -> bool:
     return isinstance(engine, (_PaddleEngine, _TesseractEngine))
 
 
-def _worker_init(preferred: str) -> None:
-    global _WORKER_PREFERRED
+def _worker_init(preferred: str, cpu_threads: Optional[int]) -> None:
+    global _WORKER_PREFERRED, _WORKER_CPU_THREADS
     _WORKER_PREFERRED = preferred
+    _WORKER_CPU_THREADS = cpu_threads
     get_engine(preferred)  # load the model eagerly so startup overlaps
 
 
@@ -112,41 +117,41 @@ def _worker_read(image: np.ndarray) -> list[TextElement]:
     return engine.read(image, 0.0)
 
 
-def get_executor(preferred: str, workers: int) -> Optional[ProcessPoolExecutor]:
+def get_executor(
+    preferred: str, workers: int, cpu_threads: Optional[int] = None
+) -> Optional[ProcessPoolExecutor]:
     """Shared OCR worker pool, or None when parallel OCR is disabled/broken.
 
     Workers each hold their own engine instance, so per-image results are
-    identical to the in-process engine; only scheduling differs.
+    identical to the in-process engine; only scheduling differs. Pools are
+    cached per (engine, workers, cpu_threads) for the process lifetime.
     """
-    global _EXECUTOR, _EXECUTOR_KEY
-    if workers <= 1:
+    if workers < 1:
         return None
-    key = (preferred, workers)
-    if _EXECUTOR is not None and _EXECUTOR_KEY == key:
-        return _EXECUTOR
-    if _EXECUTOR is not None:
-        _EXECUTOR.shutdown(wait=False)
-        _EXECUTOR = None
+    key = (preferred, workers, cpu_threads)
+    executor = _EXECUTORS.get(key)
+    if executor is not None:
+        return executor
     try:
-        _EXECUTOR = ProcessPoolExecutor(
+        executor = ProcessPoolExecutor(
             max_workers=workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_worker_init,
-            initargs=(preferred,),
+            initargs=(preferred, cpu_threads),
         )
-        _EXECUTOR_KEY = key
+        _EXECUTORS[key] = executor
     except Exception as exc:
         logger.warning("OCR worker pool unavailable, falling back to sequential: %s", exc)
-        _EXECUTOR = None
-        _EXECUTOR_KEY = None
-    return _EXECUTOR
+        executor = None
+    return executor
 
 
 def submit_read(
-    preferred: str, workers: int, image: np.ndarray
+    preferred: str, workers: int, image: np.ndarray,
+    cpu_threads: Optional[int] = None,
 ) -> Optional[Future]:
     """Submit an unfiltered engine.read to the worker pool, if enabled."""
-    executor = get_executor(preferred, workers)
+    executor = get_executor(preferred, workers, cpu_threads)
     if executor is None:
         return None
     try:
