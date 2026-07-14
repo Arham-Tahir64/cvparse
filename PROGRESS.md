@@ -1451,3 +1451,129 @@ Proposed coupled change:
   opening detector/segmenter, richer CAD layer/object metadata, or manual
   labels. Further single-plan rules would be reference-specific and violate the
   generalization constraint, which is the final stopping condition.
+
+## Cross-floorplan generalization program (2026-07-14)
+
+### Validation inventory and reproducible baseline
+
+- Available real inputs are `112125_14_ARCH-3.pdf` and the user-owned,
+  untracked `112125_14_ARCH-5.pdf`. Only ARCH-3 has a corresponding semantic
+  ground-truth overlay (`goal.png`); generated ARCH-3 PDFs are predictions and
+  are not treated as labels. ARCH-5 is therefore an out-of-sample qualitative
+  smoke case, not a scored validation case.
+- Repository baseline: `183 passed` in 26.93 s before new validation work.
+- ARCH-3 baseline at commit `751b12c` (verified from the current Cycle 19
+  artifact with `tools/evaluate_annotation.py`): wall IoU 0.6831 / F1 0.8118,
+  door IoU 0.2725 / F1 0.4283, window IoU 0.5789 / F1 0.7333, room IoU 0.8002
+  / F1 0.8890, macro IoU 0.5837, foreground IoU 0.8737. Door is the
+  worst-performing labeled class.
+- ARCH-5 full OCR-enabled smoke run: 165.5 s, 153 walls, 2 doors, 1 window,
+  11/11 OCR-labeled rooms, and 3 gaps. Output:
+  `debug_output/arch5_test.{pdf,png}`. Visual inspection shows many source
+  swing arcs and exterior frame openings remain unannotated; metrics are not
+  reported because no matching reference exists.
+- A deterministic asymmetric five-room synthetic probe was generated with
+  exact wall, door, window, and room masks, four different exterior window
+  positions, four door orientations, structural wall gaps, room labels, and
+  dimension/leader clutter. Baseline direct metrics: wall IoU 0.6603
+  (P 0.7387 / R 0.8614), door IoU 0.5451 (P 0.8221 / R 0.6180), window IoU
+  0.1839 (P 0.9359 / R 0.1862), room IoU 0.9631 (P 1.0000 / R 0.9631).
+  This independently reproduces the cross-plan window-recall failure.
+
+### Generalization Cycle 1 not retained: detection-only shell carriers
+
+- Issue/root cause: on the synthetic plan and ARCH-5, shell wall extraction
+  often terminates at a framed opening, while window Strategy A requires one
+  already-continuous wall model to carry all frame strokes.
+- Hypothesis: temporarily bridge two collinear, thickness-consistent,
+  exterior-tangent wall fragments only when at least two length-consistent
+  parallel source strokes occupy the intervening gap. Keep the carrier out of
+  the wall mask and reject pairs that leap over another structural wall.
+- Files temporarily changed and fully reverted: `config.py`,
+  `window_detection.py`, and `test_window_detection.py`. Commands: 26 focused
+  window tests, full 186-test CV suite, three synthetic full-pipeline probes,
+  a full uncached ARCH-3 pipeline run, and the whole-image evaluator.
+- Synthetic result improved: window recall 0.1862 -> 0.4282, window IoU
+  0.1839 -> 0.3865, wall IoU 0.6603 -> 0.6811, rooms/doors unchanged.
+- Authoritative ARCH-3 result regressed: window recall only 0.6718 -> 0.6745,
+  while precision fell 0.8072 -> 0.4568 and window IoU 0.5789 -> 0.3743;
+  wall IoU fell 0.6831 -> 0.6610, room IoU 0.8002 -> 0.7975, and macro IoU
+  0.5837 -> 0.5263. The bridge promoted short shell wall-face pairs as frame
+  evidence. The entire detector/config/test change was reverted; rejected
+  output remains only in ignored debug/evaluation directories.
+
+### Generalization Cycle 2 goal: make validation coverage first-class
+
+- Replace the one-off probe with a deterministic multi-layout validation tool
+  that generates exact semantic masks across different sizes, wall thicknesses,
+  room densities, opening arrangements, skew, and image degradation. Report
+  every per-case/per-class metric plus worst case/class, never averaging away a
+  weak plan. Retain this infrastructure only with automated tests and unchanged
+  production behavior.
+
+### Generalization Cycle 2 retained: deterministic five-case validation set
+
+- Added `tools/validate_generalization.py`, which renders three different
+  layouts and two controlled variants: compact/thin/low-resolution,
+  asymmetric/medium, dense/thick/high-resolution, +1.5-degree skew, and a
+  deterministically downsampled/blurred/noisy scan. Every case has independently
+  generated wall, door, window, and room masks plus ground-truth object counts.
+- The runner executes the production pipeline, exports source/truth/prediction
+  masks and three-panel comparisons, records every per-plan/per-class metric
+  and object-count delta, and reports both the worst floorplan and worst
+  class/case. It explicitly keeps ARCH-5 unscored and never uses predictions as
+  ground truth.
+- Added four tests covering deterministic generation, complete labels,
+  unlabelled drafting clutter, metric correctness, and worst-case reporting.
+  Full baseline: 190 CV tests after Cycle 3 additions; all pass.
+- Baseline report: `evaluation_output/generalization_baseline/report.json`.
+
+| Plan | Wall IoU | Door IoU | Window IoU | Room IoU | Macro IoU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| compact_thin | 0.6105 | 0.0000 | 0.0000 | 0.9564 | 0.3917 |
+| asymmetric_medium | 0.6815 | 0.3177 | 0.3758 | 0.9661 | 0.5853 |
+| dense_large | 0.4398 | 0.1047 | 0.5345 | 0.7030 | 0.4455 |
+| skewed_medium | 0.4669 | 0.3683 | 0.1150 | 0.9309 | 0.4703 |
+| degraded_dense | 0.2786 | 0.1533 | 0.2783 | 0.7022 | 0.3531 |
+
+- Worst floorplan: `degraded_dense` at macro IoU 0.3531. Worst class/case:
+  both door and window are zero-IoU on `compact_thin`; deterministic class order
+  reports door first. Door is the recurring weakest class by recall across the
+  scale extremes; windows are the next cross-plan target.
+
+### Generalization Cycle 3 retained: wall-scale-aware door proposal radius
+
+- Root cause: the fixed 65 px Hough minimum rejected all three valid 60 px
+  compact door swings before semantic validation. A sweep of 25/35/45/55 px
+  produced the same two high-confidence detections (door IoU 0.3774,
+  precision 0.6391, recall 0.4796); 65 px produced zero detections.
+- Change: compute the proposal-only lower radius from 2.5 times the
+  75th-percentile thickness of long, confidence-qualified paired walls, with a
+  20 px safety floor and the old configured 65 px value as the adaptation cap.
+  Short fragments, single faces, dimensions, and image dimensions do not set
+  scale. All existing opening, wall-continuation, leaf, hinge, deduplication,
+  and room-topology checks remain unchanged. Effective bounds are exported in
+  debug counts.
+- Added tests for thin-wall adaptation, preservation of the nominal bound on
+  thick walls, and rejection of short fragments as scale evidence.
+- Full five-plan result: compact door IoU 0.0000 -> 0.3774, F1 0.0000 ->
+  0.5480, and object count 0/3 -> 2/3. Compact macro IoU improves 0.3917 ->
+  0.4856. The other four validation cases are pixel-identical. Compact wall
+  IoU moves 0.6105 -> 0.6086 solely because the new door sectors own local wall
+  pixels; room and window metrics are exact.
+- Full uncached ARCH-3 regression is exact across every class: wall 0.6831,
+  door 0.2725, window 0.5789, room 0.8002, macro 0.5837, foreground 0.8737.
+  Output: `debug_output/generalization_cycle3_arch3.{pdf,png}`; metrics:
+  `evaluation_output/generalization_cycle3_arch3.json`; five-plan report:
+  `evaluation_output/generalization_cycle3/report.json`.
+- Commands: focused door/validation tests, 25--65 px compact sweep, two full
+  five-case validation runs, full 190-test CV suite, full OCR-enabled uncached
+  ARCH-3 CLI, and whole-image evaluator.
+
+### Generalization Cycle 4 goal: recover scale/style-variant windows
+
+- Window is now the zero-IoU worst class on `compact_thin`; skewed window IoU
+  is 0.1150 and degraded window IoU is 0.2783. Audit which exact frame strokes
+  survive proposal classification, drafting cleanup, and shell support in all
+  three cases. Implement a cross-plan rule only if it raises these weak cases
+  without reproducing Cycle 1's ARCH-3 false shell bridges.

@@ -38,7 +38,10 @@ def run(state: PipelineState) -> PipelineState:
         leaf_binary = cv2.bitwise_and(leaf_binary, state.semantic_plan_mask)
 
     erased = _erase_walls(binary, state.walls, config)
-    circles = _hough_circles(erased, config)
+    min_radius, max_radius = _adaptive_arc_radius_bounds(state, config)
+    circles = _hough_circles(erased, config, min_radius, max_radius)
+    state.debug.segment_counts["07_arc_min_radius_px"] = round(min_radius)
+    state.debug.segment_counts["07_arc_max_radius_px"] = round(max_radius)
     logger.debug("hough circle candidates: %d", len(circles))
 
     door_id_gen = IdGenerator("D")
@@ -140,14 +143,51 @@ def _erase_walls(binary: np.ndarray, walls, config) -> np.ndarray:
     return erased
 
 
-def _hough_circles(erased: np.ndarray, config) -> list[tuple[float, float, float]]:
+def _adaptive_arc_radius_bounds(state: PipelineState, config) -> tuple[float, float]:
+    """Return scale-aware Hough bounds derived from structural wall width.
+
+    The configured range describes a nominal 200-DPI architectural sheet. A
+    raster plan can encode the same geometry at a smaller scale. Paired-wall
+    thickness is an independent structural scale cue, unlike image dimensions
+    or OCR size, and ignores isolated thin drafting strokes. Adapt only the
+    lower proposal bound; every semantic door gate still validates candidates.
+    """
+    thicknesses = [
+        max(wall.thickness, wall.visual_thickness)
+        for wall in state.walls
+        if (
+            wall.merge_kind == "paired_faces"
+            and wall.merge_confidence >= 0.6
+            and max(wall.thickness, wall.visual_thickness) > 0
+            and wall.centerline.length >= 3.0 * max(
+                wall.thickness, wall.visual_thickness,
+            )
+        )
+    ]
+    if not thicknesses:
+        return config.door_arc_min_radius_px, config.door_arc_max_radius_px
+    structural_thickness = float(np.percentile(thicknesses, 75))
+    adaptive_minimum = max(
+        config.door_adaptive_min_radius_floor_px,
+        (config.door_adaptive_min_radius_thickness_ratio
+         * structural_thickness),
+    )
+    return (
+        min(config.door_arc_min_radius_px, adaptive_minimum),
+        config.door_arc_max_radius_px,
+    )
+
+
+def _hough_circles(
+    erased: np.ndarray, config, min_radius: float, max_radius: float,
+) -> list[tuple[float, float, float]]:
     blurred = cv2.GaussianBlur(erased, (5, 5), 1.5)
     circles = cv2.HoughCircles(
         blurred, cv2.HOUGH_GRADIENT,
         dp=config.hough_circles_dp, minDist=config.hough_circles_min_dist,
         param1=config.hough_circles_param1, param2=config.hough_circles_param2,
-        minRadius=int(config.door_arc_min_radius_px),
-        maxRadius=int(config.door_arc_max_radius_px),
+        minRadius=int(round(min_radius)),
+        maxRadius=int(round(max_radius)),
     )
     if circles is None:
         return []

@@ -151,6 +151,12 @@ class PipelineConfig:
     door_arc_min_radius_px: float = 65.0
     # At 1/4" = 1'-0" and 200 DPI a common 2'-6" leaf is ~125 px.
     door_arc_max_radius_px: float = 160.0
+    # Raster inputs and differently scaled sheets can have legitimate swing
+    # arcs below the nominal 200-DPI bound. Estimate a conservative lower
+    # proposal radius from the 75th-percentile paired-wall thickness, while
+    # retaining the configured radius as an upper cap on that adaptation.
+    door_adaptive_min_radius_thickness_ratio: float = 2.5
+    door_adaptive_min_radius_floor_px: float = 20.0
     door_wall_snap_px: float = 70.0
     hough_circles_dp: float = 1.0
     hough_circles_min_dist: float = 30.0

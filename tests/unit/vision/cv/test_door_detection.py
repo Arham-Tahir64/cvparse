@@ -66,6 +66,40 @@ def test_common_scaled_door_radius_is_within_search_defaults():
     assert config.hough_circles_param2 <= 25
 
 
+def test_thin_paired_walls_adapt_door_proposal_radius_downward():
+    state = PipelineState(config=PipelineConfig())
+    state.walls = [wall("W1", 0, 0, 300, 0, thickness=16)]
+
+    minimum, maximum = door_detection._adaptive_arc_radius_bounds(
+        state, state.config,
+    )
+
+    assert minimum == 40
+    assert maximum == state.config.door_arc_max_radius_px
+
+
+def test_thick_paired_walls_keep_nominal_door_minimum():
+    state = PipelineState(config=PipelineConfig())
+    state.walls = [wall("W1", 0, 0, 500, 0, thickness=40)]
+
+    minimum, _ = door_detection._adaptive_arc_radius_bounds(
+        state, state.config,
+    )
+
+    assert minimum == state.config.door_arc_min_radius_px
+
+
+def test_short_wall_fragments_do_not_set_door_scale():
+    state = PipelineState(config=PipelineConfig())
+    state.walls = [wall("W1", 0, 0, 30, 0, thickness=20)]
+
+    minimum, _ = door_detection._adaptive_arc_radius_bounds(
+        state, state.config,
+    )
+
+    assert minimum == state.config.door_arc_min_radius_px
+
+
 def test_circle_center_must_remain_within_one_radius_of_snapped_hinge():
     config = PipelineConfig()
     hinge = Point(100, 100)
