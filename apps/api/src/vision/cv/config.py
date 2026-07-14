@@ -238,6 +238,10 @@ class PipelineConfig:
 
     # --- Module 10: OCR ---
     ocr_engine: Literal["paddle", "tesseract"] = "paddle"
+    # OCR worker processes for tiled reads; results are identical to the
+    # sequential path (same engine per image), only scheduling differs.
+    # <= 1 disables the pool and keeps everything in-process.
+    ocr_parallel_workers: int = 4
     ocr_first_pass_confidence: float = 0.3
     ocr_second_pass_confidence: float = 0.6
     room_label_vocab: tuple[str, ...] = field(default=DEFAULT_ROOM_LABEL_VOCAB)

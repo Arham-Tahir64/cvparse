@@ -8,7 +8,7 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import numpy as np
 
@@ -281,6 +281,9 @@ class PipelineState:
     rooms: list[Room] = field(default_factory=list)
     # Pre-completion room geometry used only for exterior window context.
     window_context_rooms: list[Room] = field(default_factory=list)
+    # In-flight second-pass OCR (concurrent.futures.Future) started by module
+    # 03 so it overlaps modules 04-13; module 10 consumes and clears it.
+    ocr_second_pass_future: Optional[Any] = None
     debug: DebugInfo = field(default_factory=DebugInfo)
 
     def to_takeoff_result(self) -> CVTakeoffResult:

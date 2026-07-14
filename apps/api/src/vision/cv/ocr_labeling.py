@@ -37,7 +37,19 @@ def run(state: PipelineState) -> PipelineState:
             "(pip install paddleocr) or pytesseract plus the tesseract binary",
         )
 
-    texts = engine.read(state.image, config.ocr_second_pass_confidence)
+    texts = None
+    future = state.ocr_second_pass_future
+    if future is not None:
+        state.ocr_second_pass_future = None
+        try:
+            texts = [
+                t for t in future.result()
+                if t.confidence >= config.ocr_second_pass_confidence
+            ]
+        except Exception as exc:
+            logger.warning("background second-pass OCR failed, rereading: %s", exc)
+    if texts is None:
+        texts = engine.read(state.image, config.ocr_second_pass_confidence)
     logger.debug("second-pass OCR found %d text elements", len(texts))
 
     matched = [(t, _match_vocab(t.text, config.room_label_vocab)) for t in texts]

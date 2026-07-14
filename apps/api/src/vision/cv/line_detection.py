@@ -47,8 +47,21 @@ def run(state: PipelineState) -> PipelineState:
             state.debug.messages.append(msg)
             state.raw_texts = []
         else:
+            executor = None
+            if ocr_engines.supports_worker_pool(engine):
+                executor = ocr_engines.get_executor(
+                    engine.name, config.ocr_parallel_workers
+                )
+            # Second-pass OCR (module 10) depends only on state.image, which
+            # no later stage mutates. Submit it first - the full-sheet read is
+            # the longest single job - so it runs while modules 04-13 work.
+            if state.ocr_second_pass_future is None and executor is not None:
+                state.ocr_second_pass_future = ocr_engines.submit_read(
+                    engine.name, config.ocr_parallel_workers, state.image
+                )
             state.raw_texts = run_ocr_first_pass(
-                state.image, engine, config.ocr_first_pass_confidence
+                state.image, engine, config.ocr_first_pass_confidence,
+                executor=executor,
             )
 
     if config.debug_visualize and config.debug_output_dir:
@@ -60,12 +73,12 @@ def run(state: PipelineState) -> PipelineState:
     return state
 
 
-def run_ocr_first_pass(image, engine, confidence_threshold) -> list[TextElement]:
+def run_ocr_first_pass(image, engine, confidence_threshold, executor=None) -> list[TextElement]:
     """Locate text regions. This pass finds text, it does not read labels.
 
     Tiled so large sheets keep small dimension text at native resolution.
     """
-    texts = ocr_engines.read_tiled(engine, image, confidence_threshold)
+    texts = ocr_engines.read_tiled(engine, image, confidence_threshold, executor=executor)
     logger.debug("first-pass OCR found %d text elements", len(texts))
     return texts
 

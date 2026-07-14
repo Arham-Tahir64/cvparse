@@ -7,6 +7,8 @@ or degradable (module 03 first pass, which only locates text).
 from __future__ import annotations
 
 import logging
+import multiprocessing
+from concurrent.futures import Future, ProcessPoolExecutor
 from typing import Any, Optional
 
 import numpy as np
@@ -17,6 +19,10 @@ logger = logging.getLogger("flowbuildr.cv.ocr")
 
 _ENGINE_CACHE: dict[str, Any] = {}
 _UNAVAILABLE = object()
+
+_EXECUTOR: Optional[ProcessPoolExecutor] = None
+_EXECUTOR_KEY: Optional[tuple[str, int]] = None
+_WORKER_PREFERRED = "paddle"
 
 
 def get_engine(preferred: str = "paddle") -> Optional[Any]:
@@ -83,40 +89,127 @@ def _load_tesseract():
     return _TesseractEngine(pytesseract)
 
 
+def supports_worker_pool(engine) -> bool:
+    """True when `engine` can be recreated identically in a worker process.
+
+    Injected/custom engines (tests, adapters) must keep running in-process;
+    a worker would silently resolve a different backend for them.
+    """
+    return isinstance(engine, (_PaddleEngine, _TesseractEngine))
+
+
+def _worker_init(preferred: str) -> None:
+    global _WORKER_PREFERRED
+    _WORKER_PREFERRED = preferred
+    get_engine(preferred)  # load the model eagerly so startup overlaps
+
+
+def _worker_read(image: np.ndarray) -> list[TextElement]:
+    """Unfiltered read in an OCR worker process; callers apply thresholds."""
+    engine = get_engine(_WORKER_PREFERRED)
+    if engine is None:
+        raise RuntimeError("no OCR engine available in worker process")
+    return engine.read(image, 0.0)
+
+
+def get_executor(preferred: str, workers: int) -> Optional[ProcessPoolExecutor]:
+    """Shared OCR worker pool, or None when parallel OCR is disabled/broken.
+
+    Workers each hold their own engine instance, so per-image results are
+    identical to the in-process engine; only scheduling differs.
+    """
+    global _EXECUTOR, _EXECUTOR_KEY
+    if workers <= 1:
+        return None
+    key = (preferred, workers)
+    if _EXECUTOR is not None and _EXECUTOR_KEY == key:
+        return _EXECUTOR
+    if _EXECUTOR is not None:
+        _EXECUTOR.shutdown(wait=False)
+        _EXECUTOR = None
+    try:
+        _EXECUTOR = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_worker_init,
+            initargs=(preferred,),
+        )
+        _EXECUTOR_KEY = key
+    except Exception as exc:
+        logger.warning("OCR worker pool unavailable, falling back to sequential: %s", exc)
+        _EXECUTOR = None
+        _EXECUTOR_KEY = None
+    return _EXECUTOR
+
+
+def submit_read(
+    preferred: str, workers: int, image: np.ndarray
+) -> Optional[Future]:
+    """Submit an unfiltered engine.read to the worker pool, if enabled."""
+    executor = get_executor(preferred, workers)
+    if executor is None:
+        return None
+    try:
+        return executor.submit(_worker_read, image)
+    except Exception as exc:
+        logger.warning("OCR submit failed, falling back to sequential: %s", exc)
+        return None
+
+
 def read_tiled(
     engine, image: np.ndarray, confidence_threshold: float,
     tile_px: int = 2400, overlap_px: int = 120,
+    executor: Optional[ProcessPoolExecutor] = None,
 ) -> list[TextElement]:
     """Run OCR over overlapping tiles at native resolution.
 
     Large sheets get internally downscaled by the engines (PaddleOCR caps the
     long side at 4000 px), which destroys small dimension text. Tiling keeps
     the text at full resolution. Duplicates in overlap zones are dropped by
-    center proximity.
+    center proximity. With an executor, tiles are read by worker processes in
+    parallel; results are collected in the same tile order as the sequential
+    path, so output is identical.
     """
     h, w = image.shape[:2]
     if max(h, w) <= tile_px:
         return engine.read(image, confidence_threshold)
 
-    elements: list[TextElement] = []
+    tiles: list[tuple[int, int, np.ndarray]] = []
     step = tile_px - overlap_px
     for y0 in range(0, h, step):
         for x0 in range(0, w, step):
             y1, x1 = min(y0 + tile_px, h), min(x0 + tile_px, w)
             tile = image[y0:y1, x0:x1]
-            if tile.size == 0 or tile.min() == tile.max():
-                continue  # blank tile
-            for t in engine.read(tile, confidence_threshold):
-                elements.append(TextElement(
-                    text=t.text,
-                    bbox=(t.bbox[0] + x0, t.bbox[1] + y0,
-                          t.bbox[2] + x0, t.bbox[3] + y0),
-                    confidence=t.confidence,
-                ))
+            if tile.size > 0 and tile.min() != tile.max():  # skip blank tiles
+                tiles.append((x0, y0, tile))
             if x1 == w:
                 break
         if y0 + tile_px >= h:
             break
+
+    per_tile: Optional[list[list[TextElement]]] = None
+    if executor is not None:
+        try:
+            futures = [executor.submit(_worker_read, tile) for _, _, tile in tiles]
+            per_tile = [
+                [t for t in f.result() if t.confidence >= confidence_threshold]
+                for f in futures
+            ]
+        except Exception as exc:
+            logger.warning("parallel tile OCR failed, retrying sequentially: %s", exc)
+            per_tile = None
+    if per_tile is None:
+        per_tile = [engine.read(tile, confidence_threshold) for _, _, tile in tiles]
+
+    elements: list[TextElement] = []
+    for (x0, y0, _), texts in zip(tiles, per_tile):
+        for t in texts:
+            elements.append(TextElement(
+                text=t.text,
+                bbox=(t.bbox[0] + x0, t.bbox[1] + y0,
+                      t.bbox[2] + x0, t.bbox[3] + y0),
+                confidence=t.confidence,
+            ))
 
     # dedupe overlap-zone duplicates: same text with nearby centers
     deduped: list[TextElement] = []
