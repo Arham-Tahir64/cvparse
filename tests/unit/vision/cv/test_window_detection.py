@@ -290,3 +290,23 @@ def test_exterior_window_must_be_tangent_to_nearest_hull_edge():
     assert not window_detection._has_exterior_tangent(
         perpendicular, Point(300, 100), state, state.config
     )
+
+
+def test_secondary_thin_shell_representation_does_not_carry_window():
+    state = make_state([])
+    state.rooms = [Room(
+        "R1", [Point(100, 100), Point(500, 100), Point(500, 300), Point(100, 300)],
+        area=80000,
+    )]
+    primary = wall("WP", 100, 100, 500, 100, thickness=80)
+    secondary = wall("WS", 150, 102, 250, 102, thickness=30)
+    state.walls = [primary, secondary]
+    state.windows = [
+        Window("WD0001", Point(300, 100), 80, primary.id),
+        Window("WD0002", Point(200, 102), 80, secondary.id),
+    ]
+
+    window_detection._filter_nontangent_windows(state)
+
+    assert [window.id for window in state.windows] == ["WD0001"]
+    assert state.debug.segment_counts["08_thin_support_windows"] == 1

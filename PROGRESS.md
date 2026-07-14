@@ -1210,3 +1210,46 @@ Proposed coupled change:
   secondary thin wall representations without affecting the five recovered
   openings, then recover the top span only if independent repeated source
   evidence distinguishes it from the remaining top false positive.
+
+### Cycle 14 retained: require primary exterior-shell support
+
+- Root cause: the shifted bottom candidate is produced on `W0117`, a 30.9 px
+  secondary representation of the bottom shell. All five source-supported
+  retained openings sit on primary 52--67 px wall pairs. A second top false
+  candidate sits on a 37 px representation, but removing both at once caused
+  a small room/foreground ownership regression and was rejected.
+- Change: the detector now measures the 75th-percentile thickness of
+  exterior-context, hull-tangent paired walls for each plan. A window's
+  supporting wall must be at least 50% of that plan-relative shell reference.
+  This scales with DPI and construction rather than imposing an absolute wall
+  width. The 0.60 experiment that removed two candidates was not retained;
+  0.50 surgically rejects only the shifted bottom candidate.
+- Full rendered results versus Cycle 13: wall IoU 0.6633 -> 0.6694, window IoU
+  0.4716 -> 0.4897, room IoU remains 0.8001, macro IoU 0.5425 -> 0.5485,
+  and foreground IoU remains 0.8737 (foreground TP improves by 13). Window
+  precision improves 0.6130 -> 0.6440 and F1 0.6409 -> 0.6575 without recall
+  loss. Door IoU is unchanged within rendered rounding at 0.2350.
+- The measurement-line crop improves again: wall IoU 0.7705 -> 0.8033 while
+  room IoU stays 0.9393 with 0 vertical / 2 horizontal residual barriers. The
+  restored-wall crop remains wall IoU 0.4528, boundary F1 0.7394, and room IoU
+  0.6618.
+- Files changed: `config.py`, `window_detection.py`, window unit tests, and this
+  log. Commands: top-shell frame/classification audit, exterior-thickness
+  audit, 0.60/0.50 cached comparisons, targeted and full CV tests, full
+  OCR-enabled uncached CLI, whole-image evaluator, focused evaluator, and
+  opening crop exporter. Tests: 178 passed.
+- Full uncached run: 370.7 s, 116 walls, 7 doors, 6 windows, 9/9 labeled rooms,
+  and 13 gaps. Output: `debug_output/highlight_cycle14_full.{pdf,png}`;
+  metrics: `evaluation_output/highlight_cycle14_full.json`; masks:
+  `debug_output/highlight_cycle14_full_intermediates/13_semantic_masks/`;
+  focused artifacts: `debug_output/cycle14_opening_audit/`.
+
+### Cycle 15 goal: prevent rejected windows from suppressing valid doors
+
+- Door detection produces eight candidates, but window conflict resolution
+  currently runs before exterior tangency/support filtering. The audit found
+  door `D0005` suppressed by a provisional window that is later rejected,
+  leaving neither class at that opening. Reorder conflict resolution after all
+  window validity and deduplication checks, then evaluate the restored door's
+  source support and goal overlap. Retain only if door metrics improve without
+  changing the accepted window, wall, or room masks.

@@ -114,20 +114,41 @@ def _resolve_door_window_conflicts(state: PipelineState) -> None:
 
 
 def _filter_nontangent_windows(state: PipelineState) -> None:
-    """Reject framed candidates whose supporting wall is not shell-tangent."""
+    """Reject candidates not carried by a primary shell-tangent wall."""
     wall_lookup = {wall.id: wall for wall in state.walls}
     for wall in state.walls:
         for source_id in wall.source_ids:
             wall_lookup.setdefault(source_id, wall)
-    rejected = [
-        window for window in state.windows
+    exterior_thicknesses = [
+        wall.thickness for wall in state.walls
         if (
-            wall_lookup.get(window.wall_id) is None
-            or not _has_exterior_tangent(
-                wall_lookup[window.wall_id], window.position, state, state.config,
+            wall.merge_kind == "paired_faces"
+            and _has_exterior_context(
+                wall, wall.centerline.midpoint, state, state.config,
+            )
+            and _has_exterior_tangent(
+                wall, wall.centerline.midpoint, state, state.config,
             )
         )
     ]
+    shell_thickness = (
+        float(np.percentile(exterior_thicknesses, 75))
+        if exterior_thicknesses else 0.0
+    )
+    minimum_thickness = (
+        state.config.window_min_shell_thickness_ratio * shell_thickness
+    )
+    rejected = []
+    thin_support = 0
+    for window in state.windows:
+        wall = wall_lookup.get(window.wall_id)
+        tangent = wall is not None and _has_exterior_tangent(
+            wall, window.position, state, state.config,
+        )
+        too_thin = wall is not None and wall.thickness < minimum_thickness
+        if wall is None or not tangent or too_thin:
+            rejected.append(window)
+            thin_support += int(too_thin)
     rejected_ids = {window.id for window in rejected}
     state.windows = [
         window for window in state.windows if window.id not in rejected_ids
@@ -140,6 +161,8 @@ def _filter_nontangent_windows(state: PipelineState) -> None:
         )
     ]
     state.debug.segment_counts["08_nontangent_windows"] = len(rejected)
+    state.debug.segment_counts["08_thin_support_windows"] = thin_support
+    state.debug.segment_counts["08_shell_thickness_px"] = round(shell_thickness)
 
 
 def _deduplicate_windows(state: PipelineState) -> None:
