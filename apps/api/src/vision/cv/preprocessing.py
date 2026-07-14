@@ -130,10 +130,10 @@ def _binarize(image: np.ndarray, config: PipelineConfig) -> np.ndarray:
 
 def _remove_small_components(binary: np.ndarray, min_area: int) -> np.ndarray:
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    small = stats[:, cv2.CC_STAT_AREA] <= min_area
+    small[0] = False  # background label stays
     out = binary.copy()
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] <= min_area:
-            out[labels == i] = 0
+    out[small[labels]] = 0
     return out
 
 
