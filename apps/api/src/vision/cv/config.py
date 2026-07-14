@@ -183,6 +183,11 @@ class PipelineConfig:
     window_gap_min_side_fill: float = 0.18
     window_inner_line_perp_frac: float = 0.6   # max perp dist from centerline / wall thickness
     window_inner_line_angle_tol_deg: float = 5.0
+    # Paired wall synthesis may trim a few anti-aliased pixels from an otherwise
+    # aligned frame line. Clamp only small endpoint overruns; large overhangs
+    # remain non-window evidence.
+    window_inner_line_endpoint_tol_px: float = 5.0
+    window_tolerant_frame_length_ratio: float = 0.80
     window_merge_overlap_ratio: float = 0.5    # candidates overlapping more than this merge
     # Clean-pass collinear merging can collapse repeated glazing strokes into
     # one span, so exterior topology supplies the second independent cue.

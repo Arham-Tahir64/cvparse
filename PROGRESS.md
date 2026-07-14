@@ -1116,3 +1116,50 @@ Proposed coupled change:
   merge/alignment logic on the same supporting wall. Recover the complete third
   span from repeated frame boundaries without changing the two correct spans,
   top/left wall ownership, room masks, or the Cycle 11 door improvement.
+
+### Cycle 12 retained: recover clipped paired-frame windows
+
+- Root cause: the two source faces of the third bottom window extend only 3 px
+  beyond the synthesized supporting wall. The strict `[0, 1]` wall-projection
+  test rejected both, even though they have matching 244/249 px spans and are
+  the exact paired lines from which wall `W0009` was synthesized.
+- A first global 5 px endpoint tolerance was rejected: it manufactured 19
+  windows, reducing wall IoU to 0.5998 and macro IoU to 0.4862. A second
+  corroborated tolerance still borrowed nearby lines from overlapping wall
+  representations and produced 11 windows. Neither experiment was retained.
+- Change: small endpoint overruns are now a strict fallback only when no exact
+  frame exists. Both corroborating faces must belong to the supporting wall's
+  `source_ids`, have distinct offsets, overlap, and agree in length by at least
+  0.80. Accepted overrun endpoints are clamped to the wall rather than allowed
+  to enlarge it. This recovers one source-supported window without coordinates
+  or ground-truth-derived class rules.
+- Full rendered results versus Cycle 11: wall IoU 0.6476 -> 0.6569, door IoU
+  0.2342 -> 0.2351, window IoU 0.2923 -> 0.3921, room IoU 0.8001 -> 0.8001,
+  macro IoU 0.4935 -> 0.5211, and foreground IoU 0.8736 -> 0.8737. Window
+  recall improves 0.4148 -> 0.5371 and F1 0.4524 -> 0.5633; detected windows
+  increase only from 5 to 6.
+- Both protected structural cases remain non-regressing. The measurement crop
+  improves from wall IoU 0.7169 to 0.7705 while room IoU stays 0.9393 with
+  0 vertical / 2 horizontal residual barrier pixels. The restored-wall crop
+  remains wall IoU 0.4528, boundary F1 0.7394, and room IoU 0.6618.
+- Files changed: `config.py`, `window_detection.py`, window unit tests, and this
+  log. Commands: candidate/source-provenance audit, rejected tolerance sweeps,
+  cached downstream comparisons, targeted and full CV tests, full uncached
+  CLI, whole-image evaluator, focused structural evaluator, and per-opening
+  crop exporter.
+- Tests: 174 passed. Full uncached run: 395.6 s, 116 walls, 7 doors, 6 windows,
+  9/9 labeled rooms, and 13 gaps. Output:
+  `debug_output/highlight_cycle12_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle12_full.json`; masks:
+  `debug_output/highlight_cycle12_full_intermediates/13_semantic_masks/`;
+  35 focused opening artifacts: `debug_output/cycle11_opening_audit/`.
+
+### Cycle 13 goal: recover the missing left exterior window without duplicates
+
+- The next largest source-supported opening miss is the left exterior window.
+  Its wall interval has four mutually consistent, offset frame lines, but the
+  current provenance fallback excludes them because paired-wall synthesis
+  selected different face IDs. Require stronger repeated-frame evidence than
+  the two-line paired fallback, then deduplicate coincident detections across
+  overlapping wall representations. Retain only if it adds the missing window
+  once and all global and protected-region metrics remain non-regressing.

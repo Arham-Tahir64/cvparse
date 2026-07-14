@@ -155,7 +155,8 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
     ux = (cl.end.x - cl.start.x) / max(1e-6, cl.length)
     uy = (cl.end.y - cl.start.y) / max(1e-6, cl.length)
     nx, ny = -uy, ux
-    intervals: list[tuple[float, float, float]] = []
+    exact_intervals: list[tuple[float, float, float]] = []
+    tolerant_intervals: list[tuple[float, float, float]] = []
     for i in idx:
         seg = candidates[i]
         if angle_diff_rad(seg.angle_rad, cl.angle_rad) > angle_tol:
@@ -165,14 +166,54 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
         t0 = project_param(seg.start, cl.start, cl.end)
         t1 = project_param(seg.end, cl.start, cl.end)
         t0, t1 = sorted((t0, t1))
-        if t0 < 0.0 or t1 > 1.0:
+        endpoint_tolerance = (
+            config.window_inner_line_endpoint_tol_px / max(1.0, cl.length)
+        )
+        if t0 < -endpoint_tolerance or t1 > 1.0 + endpoint_tolerance:
             continue
+        exact = t0 >= 0.0 and t1 <= 1.0
+        t0, t1 = max(0.0, t0), min(1.0, t1)
         offset = ((seg.midpoint.x - cl.midpoint.x) * nx +
                   (seg.midpoint.y - cl.midpoint.y) * ny)
-        intervals.append((t0, t1, offset))
+        # A tolerant line must be one of the paired faces that generated this
+        # wall. Otherwise nearby overlapping wall representations can borrow
+        # each other's frame lines and manufacture duplicate/false windows.
+        if not exact and seg.id not in wall.source_ids:
+            continue
+        target = exact_intervals if exact else tolerant_intervals
+        target.append((t0, t1, offset))
+
+    # Do not let tolerance enlarge or duplicate an existing strict match. It
+    # is only a fallback for a paired frame whose anti-aliased faces both
+    # overrun a synthesized wall endpoint by a few pixels. Corroborating faces
+    # must overlap, occupy distinct offsets, and have similar span lengths.
+    intervals = exact_intervals
+    min_parallel_lines = config.window_min_parallel_lines
+    if not intervals and tolerant_intervals:
+        corroborated = []
+        for index, candidate in enumerate(tolerant_intervals):
+            t0, t1, offset = candidate
+            length = t1 - t0
+            for other_index, other in enumerate(tolerant_intervals):
+                if index == other_index or abs(offset - other[2]) < 1.0:
+                    continue
+                other_length = other[1] - other[0]
+                overlap = min(t1, other[1]) - max(t0, other[0])
+                length_ratio = min(length, other_length) / max(
+                    1e-6, max(length, other_length)
+                )
+                if (
+                    overlap > config.window_merge_overlap_ratio
+                    * min(length, other_length)
+                    and length_ratio >= config.window_tolerant_frame_length_ratio
+                ):
+                    corroborated.append(candidate)
+                    break
+        intervals = corroborated
+        min_parallel_lines = max(2, min_parallel_lines)
 
     merged = _frame_clusters(
-        intervals, config.window_merge_overlap_ratio, config.window_min_parallel_lines
+        intervals, config.window_merge_overlap_ratio, min_parallel_lines
     )
     results = []
     for t0, t1 in merged:

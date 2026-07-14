@@ -73,6 +73,32 @@ def test_inner_line_outside_extent_no_window():
     assert state.windows == []
 
 
+def test_frame_lines_with_small_wall_endpoint_overrun_are_clamped():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    w.source_ids = ["a", "b"]
+    inner_a = seg(97, 180, 348, 180, sid="a")
+    inner_b = seg(102, 220, 353, 220, sid="b")
+    state = make_state([w], [inner_a, inner_b])
+
+    window_detection.run(state)
+
+    assert len(state.windows) == 1
+    assert abs(state.windows[0].position.x - 225) < 3
+    assert abs(state.windows[0].width - 250) < 3
+
+
+def test_mismatched_overrun_lines_do_not_manufacture_window():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    w.source_ids = ["short", "long"]
+    short = seg(97, 180, 250, 180, sid="short")
+    long = seg(102, 220, 353, 220, sid="long")
+    state = make_state([w], [short, long])
+
+    window_detection.run(state)
+
+    assert state.windows == []
+
+
 def test_inner_line_too_short_no_window():
     w = wall("W0001", 100, 200, 500, 200)
     inner = seg(300, 200, 315, 200)  # 15 px < window_gap_min_px
