@@ -62,6 +62,7 @@ def run(state: PipelineState) -> PipelineState:
     state.windows = windows
     _resolve_door_window_conflicts(state)
     _filter_nontangent_windows(state)
+    _deduplicate_windows(state)
     state.debug.segment_counts["08_windows"] = len(state.windows)
     logger.info("detected %d windows", len(state.windows))
 
@@ -141,6 +142,77 @@ def _filter_nontangent_windows(state: PipelineState) -> None:
     state.debug.segment_counts["08_nontangent_windows"] = len(rejected)
 
 
+def _deduplicate_windows(state: PipelineState) -> None:
+    """Collapse one framed opening found on overlapping wall representations."""
+    wall_lookup = {wall.id: wall for wall in state.walls}
+    kept: list[Window] = []
+    rejected: list[Window] = []
+    for candidate in state.windows:
+        candidate_wall = wall_lookup.get(candidate.wall_id)
+        duplicate_index = None
+        for index, existing in enumerate(kept):
+            existing_wall = wall_lookup.get(existing.wall_id)
+            if candidate_wall is None or existing_wall is None:
+                continue
+            width_ratio = min(candidate.width, existing.width) / max(
+                1e-6, max(candidate.width, existing.width)
+            )
+            center_limit = max(
+                state.config.window_inner_line_endpoint_tol_px,
+                state.config.window_dedup_center_ratio
+                * min(candidate.width, existing.width),
+            )
+            if (
+                angle_diff_rad(
+                    candidate_wall.centerline.angle_rad,
+                    existing_wall.centerline.angle_rad,
+                ) <= math.radians(state.config.window_inner_line_angle_tol_deg)
+                and candidate.position.distance_to(existing.position) <= center_limit
+                and width_ratio >= state.config.window_dedup_width_ratio
+            ):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            kept.append(candidate)
+            continue
+
+        existing = kept[duplicate_index]
+        existing_wall = wall_lookup[existing.wall_id]
+        # Prefer the more reliable/thicker structural representation; the
+        # opening geometry itself remains source-derived in either case.
+        candidate_score = (
+            candidate_wall.merge_confidence,
+            candidate_wall.fit_support_ratio,
+            candidate_wall.thickness,
+        )
+        existing_score = (
+            existing_wall.merge_confidence,
+            existing_wall.fit_support_ratio,
+            existing_wall.thickness,
+        )
+        if candidate_score > existing_score:
+            kept[duplicate_index] = candidate
+            rejected.append(existing)
+        else:
+            rejected.append(candidate)
+
+    rejected_keys = {(window.wall_id, window.position.x, window.position.y)
+                     for window in rejected}
+    state.windows = kept
+    state.gaps = [
+        gap for gap in state.gaps
+        if not (
+            gap.kind == "window"
+            and any(
+                gap.wall_id == wall_id
+                and gap.center.distance_to(Point(x, y)) <= 2.0
+                for wall_id, x, y in rejected_keys
+            )
+        )
+    ]
+    state.debug.segment_counts["08_duplicate_windows"] = len(rejected)
+
+
 # ---------------------------------------------------------------------------
 # Strategy A
 # ---------------------------------------------------------------------------
@@ -157,6 +229,7 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
     nx, ny = -uy, ux
     exact_intervals: list[tuple[float, float, float]] = []
     tolerant_intervals: list[tuple[float, float, float]] = []
+    source_tolerant_intervals: list[tuple[float, float, float]] = []
     for i in idx:
         seg = candidates[i]
         if angle_diff_rad(seg.angle_rad, cl.angle_rad) > angle_tol:
@@ -175,46 +248,41 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
         t0, t1 = max(0.0, t0), min(1.0, t1)
         offset = ((seg.midpoint.x - cl.midpoint.x) * nx +
                   (seg.midpoint.y - cl.midpoint.y) * ny)
-        # A tolerant line must be one of the paired faces that generated this
-        # wall. Otherwise nearby overlapping wall representations can borrow
-        # each other's frame lines and manufacture duplicate/false windows.
-        if not exact and seg.id not in wall.source_ids:
-            continue
-        target = exact_intervals if exact else tolerant_intervals
-        target.append((t0, t1, offset))
+        interval = (t0, t1, offset)
+        if exact:
+            exact_intervals.append(interval)
+        else:
+            tolerant_intervals.append(interval)
+            if seg.id in wall.source_ids:
+                source_tolerant_intervals.append(interval)
 
     # Do not let tolerance enlarge or duplicate an existing strict match. It
     # is only a fallback for a paired frame whose anti-aliased faces both
     # overrun a synthesized wall endpoint by a few pixels. Corroborating faces
     # must overlap, occupy distinct offsets, and have similar span lengths.
-    intervals = exact_intervals
-    min_parallel_lines = config.window_min_parallel_lines
-    if not intervals and tolerant_intervals:
-        corroborated = []
-        for index, candidate in enumerate(tolerant_intervals):
-            t0, t1, offset = candidate
-            length = t1 - t0
-            for other_index, other in enumerate(tolerant_intervals):
-                if index == other_index or abs(offset - other[2]) < 1.0:
-                    continue
-                other_length = other[1] - other[0]
-                overlap = min(t1, other[1]) - max(t0, other[0])
-                length_ratio = min(length, other_length) / max(
-                    1e-6, max(length, other_length)
-                )
-                if (
-                    overlap > config.window_merge_overlap_ratio
-                    * min(length, other_length)
-                    and length_ratio >= config.window_tolerant_frame_length_ratio
-                ):
-                    corroborated.append(candidate)
-                    break
-        intervals = corroborated
-        min_parallel_lines = max(2, min_parallel_lines)
-
     merged = _frame_clusters(
-        intervals, config.window_merge_overlap_ratio, min_parallel_lines
+        exact_intervals, config.window_merge_overlap_ratio,
+        config.window_min_parallel_lines,
     )
+    if not merged:
+        source_corroborated = _corroborated_tolerant_intervals(
+            source_tolerant_intervals, config,
+        )
+        merged = _frame_clusters(
+            source_corroborated, config.window_merge_overlap_ratio,
+            max(2, config.window_min_parallel_lines),
+        )
+    if not merged:
+        # Paired-wall synthesis can choose alternate long faces at a crowded
+        # exterior opening. Three or more agreeing offsets are stronger frame
+        # evidence than the two source-ID fallback and remain independent of
+        # any one wall representation.
+        repeated = _corroborated_tolerant_intervals(tolerant_intervals, config)
+        merged = _frame_clusters(
+            repeated, config.window_merge_overlap_ratio,
+            max(config.window_repeated_frame_min_lines,
+                config.window_min_parallel_lines),
+        )
     results = []
     for t0, t1 in merged:
         center = point_at_param(cl.start, cl.end, (t0 + t1) / 2.0)
@@ -225,6 +293,29 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
         results.append(window)
         state.gaps.append(_gap_record(gap_id_gen(), wall, center, width, 1.0))
     return results
+
+
+def _corroborated_tolerant_intervals(intervals, config):
+    corroborated = []
+    for index, candidate in enumerate(intervals):
+        t0, t1, offset = candidate
+        length = t1 - t0
+        for other_index, other in enumerate(intervals):
+            if index == other_index or abs(offset - other[2]) < 1.0:
+                continue
+            other_length = other[1] - other[0]
+            overlap = min(t1, other[1]) - max(t0, other[0])
+            length_ratio = min(length, other_length) / max(
+                1e-6, max(length, other_length)
+            )
+            if (
+                overlap > config.window_merge_overlap_ratio
+                * min(length, other_length)
+                and length_ratio >= config.window_tolerant_frame_length_ratio
+            ):
+                corroborated.append(candidate)
+                break
+    return corroborated
 
 
 def _frame_clusters(intervals, overlap_ratio_threshold, min_parallel_lines):

@@ -1163,3 +1163,50 @@ Proposed coupled change:
   the two-line paired fallback, then deduplicate coincident detections across
   overlapping wall representations. Retain only if it adds the missing window
   once and all global and protected-region metrics remain non-regressing.
+
+### Cycle 13 retained: repeated-frame recovery with cross-wall deduplication
+
+- Root cause: the missing left opening has four aligned source frame strokes
+  with 166--171 px spans at distinct wall-normal offsets, but paired-wall
+  synthesis chose alternate face IDs. Requiring every tolerant stroke to be a
+  selected source face was therefore too restrictive for this crowded shell
+  junction. Two overlapping wall representations independently described the
+  same opening, so accepting the repeated evidence without deduplication would
+  export it twice.
+- Change: when neither strict containment nor the two-source-face fallback
+  produces a frame, a third fallback requires at least three distinct,
+  overlapping, length-consistent offsets. Candidates are still limited to a
+  5 px endpoint overrun and exterior-context/tangency checks. A separate
+  geometry-based pass then collapses coincident, parallel, similar-width
+  windows across overlapping walls and keeps the stronger structural wall.
+- The left opening is recovered once on `W0042`; one duplicate on `W0054` is
+  suppressed. Exterior candidates with only two non-source lines remain
+  rejected. No coordinate, room label, or reference-mask feature is used.
+- Full rendered results versus Cycle 12: wall IoU 0.6569 -> 0.6633, door IoU
+  0.2351 -> 0.2350, window IoU 0.3921 -> 0.4716, room IoU 0.8001 -> 0.8001,
+  macro IoU 0.5211 -> 0.5425, and foreground IoU remains 0.8737. Window
+  recall improves 0.5371 -> 0.6715, precision 0.5922 -> 0.6130, F1
+  0.5633 -> 0.6409, and boundary F1 0.0228 -> 0.1785.
+- Both protected structural cases remain exact: measurement crop wall IoU
+  0.7705, room IoU 0.9393, 0 vertical / 2 horizontal residual barriers;
+  restored-wall crop wall IoU 0.4528, boundary F1 0.7394, room IoU 0.6618.
+- Files changed: `config.py`, `window_detection.py`, window unit tests, and this
+  log. Commands: tolerant-frame/exterior-context audit, cached downstream run,
+  whole-image evaluator, focused evaluator, opening crop exporter, 177-test CV
+  suite, and full OCR-enabled uncached CLI. A sandboxed no-OCR run was invalid
+  and overwritten; the accepted run used the existing PaddleOCR cache.
+- Full uncached run: 369.9 s, 116 walls, 7 doors, 7 windows, 9/9 labeled rooms,
+  and 14 gaps. Output: `debug_output/highlight_cycle13_full.{pdf,png}`;
+  metrics: `evaluation_output/highlight_cycle13_full.json`; masks:
+  `debug_output/highlight_cycle13_full_intermediates/13_semantic_masks/`;
+  33 focused opening artifacts: `debug_output/cycle13_opening_audit/`.
+
+### Cycle 14 goal: resolve the remaining top/bottom window mismatches
+
+- The current output still has a shifted short bottom candidate to the right of
+  the three reference windows, two unsupported top candidates, and no window
+  at the true guest-suite top opening. Audit shell-thickness consistency and
+  source-frame intervals for these four cases. First eliminate candidates on
+  secondary thin wall representations without affecting the five recovered
+  openings, then recover the top span only if independent repeated source
+  evidence distinguishes it from the remaining top false positive.

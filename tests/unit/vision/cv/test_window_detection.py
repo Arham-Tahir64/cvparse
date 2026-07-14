@@ -99,6 +99,51 @@ def test_mismatched_overrun_lines_do_not_manufacture_window():
     assert state.windows == []
 
 
+def test_three_consistent_overrun_lines_recover_repeated_frame():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    lines = [
+        seg(97, 180, 348, 180, sid="a"),
+        seg(99, 200, 352, 200, sid="b"),
+        seg(102, 220, 353, 220, sid="c"),
+    ]
+    state = make_state([w], lines)
+
+    window_detection.run(state)
+
+    assert len(state.windows) == 1
+    assert abs(state.windows[0].position.x - 225) < 3
+
+
+def test_two_non_source_overrun_lines_remain_insufficient():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    state = make_state([
+        w,
+    ], [
+        seg(97, 180, 348, 180, sid="a"),
+        seg(102, 220, 353, 220, sid="b"),
+    ])
+
+    window_detection.run(state)
+
+    assert state.windows == []
+
+
+def test_coincident_windows_on_overlapping_walls_are_deduplicated():
+    first = wall("W0001", 100, 200, 350, 200, thickness=45)
+    second = wall("W0002", 100, 202, 350, 202, thickness=55)
+    state = make_state([first, second])
+    state.windows = [
+        Window("WD0001", Point(225, 200), 250, first.id),
+        Window("WD0002", Point(225, 202), 248, second.id),
+    ]
+
+    window_detection._deduplicate_windows(state)
+
+    assert len(state.windows) == 1
+    assert state.windows[0].wall_id == second.id
+    assert state.debug.segment_counts["08_duplicate_windows"] == 1
+
+
 def test_inner_line_too_short_no_window():
     w = wall("W0001", 100, 200, 500, 200)
     inner = seg(300, 200, 315, 200)  # 15 px < window_gap_min_px

@@ -188,6 +188,9 @@ class PipelineConfig:
     # remain non-window evidence.
     window_inner_line_endpoint_tol_px: float = 5.0
     window_tolerant_frame_length_ratio: float = 0.80
+    window_repeated_frame_min_lines: int = 3
+    window_dedup_center_ratio: float = 0.10
+    window_dedup_width_ratio: float = 0.80
     window_merge_overlap_ratio: float = 0.5    # candidates overlapping more than this merge
     # Clean-pass collinear merging can collapse repeated glazing strokes into
     # one span, so exterior topology supplies the second independent cue.
