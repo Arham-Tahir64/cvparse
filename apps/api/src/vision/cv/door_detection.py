@@ -69,6 +69,10 @@ def run(state: PipelineState) -> PipelineState:
             (score, radius, coverage, cx, cy, wall, hinge, swing_end, swing_arc)
         )
 
+    candidates.extend(_endpoint_repair_candidates(
+        state, binary, leaf_binary, circles, candidates,
+    ))
+
     # Dedup: strongest door evidence wins; hinge-near duplicates collapse.
     candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
     accepted: list[tuple] = []
@@ -201,6 +205,212 @@ def _arc_coverage(image: np.ndarray, cx: float, cy: float, radius: float):
 def _mask_contains(mask: np.ndarray, x: float, y: float) -> bool:
     ix, iy = int(round(x)), int(round(y))
     return 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix] > 0
+
+
+def _endpoint_repair_candidates(
+    state: PipelineState,
+    binary: np.ndarray,
+    leaf_binary: np.ndarray,
+    circles: list[tuple[float, float, float]],
+    existing_candidates: list[tuple],
+) -> list[tuple]:
+    """Repair incomplete door arcs only when wall and room topology agree.
+
+    Wall erasure can leave less than the contiguous quarter-circle required by
+    the primary Hough path. Blindly relaxing that threshold promotes fixtures
+    and drafting marks, so this pass starts at paired wall endpoints and needs
+    five independent signals: partial quarter-arc ink, normal door geometry,
+    distinct preliminary room instances on the wall sides, an opposite jamb,
+    and a nearby Hough response. The final room pass is rerun after accepted
+    candidates split the wall network.
+    """
+    config = state.config
+    room_instances = state.room_instance_mask
+    if room_instances is None or not circles:
+        return []
+
+    minimum_thickness = (
+        config.door_arc_min_radius_px
+        * config.door_repair_min_wall_thickness_ratio
+    )
+    radius_min = int(round(config.door_arc_min_radius_px))
+    radius_max = int(round(config.door_arc_max_radius_px))
+    radius_step = max(5, int(round(config.door_arc_min_radius_px / 7.0)))
+    radii = list(range(radius_min, radius_max + 1, radius_step))
+    if radii[-1] != radius_max:
+        radii.append(radius_max)
+
+    existing_hinges = [candidate[6] for candidate in existing_candidates]
+    existing_distance = (
+        config.door_arc_min_radius_px
+        * config.door_repair_existing_hinge_ratio
+    )
+    proposals: list[tuple[float, tuple]] = []
+    for wall in state.walls:
+        if (wall.merge_kind != "paired_faces" or
+                wall.thickness < minimum_thickness):
+            continue
+        cl = wall.centerline
+        dx, dy = cl.end.x - cl.start.x, cl.end.y - cl.start.y
+        if math.hypot(dx, dy) <= 1e-6:
+            continue
+        axis_angle = math.atan2(dy, dx)
+        for hinge in (cl.start, cl.end):
+            if ((state.semantic_plan_mask is not None and
+                 not _mask_contains(state.semantic_plan_mask, hinge.x, hinge.y)) or
+                    any(hinge.distance_to(other) <= existing_distance
+                        for other in existing_hinges)):
+                continue
+            side_a, side_b = _room_side_labels(
+                room_instances, wall, hinge, config,
+            )
+            if side_a <= 0 or side_b <= 0 or side_a == side_b:
+                continue
+            for radius in radii:
+                hough_ratio = _nearest_hough_center_ratio(
+                    circles, hinge, radius,
+                )
+                if hough_ratio > config.door_repair_max_hough_center_ratio:
+                    continue
+                for opening_sign in (-1.0, 1.0):
+                    closed_angle = (axis_angle if opening_sign > 0
+                                    else axis_angle + math.pi)
+                    far_jamb_ratio = _far_jamb_ratio(
+                        state.walls, wall, hinge, radius, closed_angle,
+                    )
+                    if far_jamb_ratio > config.door_repair_max_far_jamb_ratio:
+                        continue
+                    for leaf_sign in (-1.0, 1.0):
+                        leaf_angle = axis_angle + leaf_sign * math.pi / 2
+                        arc_support = _quarter_arc_support(
+                            leaf_binary, hinge, radius,
+                            closed_angle, leaf_angle,
+                        )
+                        if not (config.door_repair_arc_support_min <= arc_support
+                                <= config.door_repair_arc_support_max):
+                            continue
+                        geometry = _candidate_geometry(
+                            binary, wall, hinge.x, hinge.y, radius,
+                            closed_angle, leaf_angle, config,
+                            leaf_binary=leaf_binary,
+                        )
+                        if (geometry is None or
+                                geometry[0] < config.door_repair_min_geometry_score):
+                            continue
+                        score, snapped, swing_end, swing_arc = geometry
+                        rank = (arc_support + score - hough_ratio
+                                - far_jamb_ratio)
+                        candidate = (
+                            score, float(radius), arc_support,
+                            hinge.x, hinge.y, wall, snapped,
+                            swing_end, swing_arc,
+                        )
+                        proposals.append((rank, candidate))
+
+    proposals.sort(key=lambda item: item[0], reverse=True)
+    selected: list[tuple] = []
+    for _, candidate in proposals:
+        hinge = candidate[6]
+        if any(hinge.distance_to(other[6]) < config.door_repair_dedup_dist_px
+               for other in selected):
+            continue
+        selected.append(candidate)
+    logger.debug("endpoint door repairs: %d from %d proposals",
+                 len(selected), len(proposals))
+    return selected
+
+
+def _quarter_arc_support(
+    image: np.ndarray,
+    hinge: Point,
+    radius: float,
+    start_angle: float,
+    end_angle: float,
+) -> float:
+    """Fraction of a proposed quarter circumference supported by source ink."""
+    delta = (end_angle - start_angle + math.pi) % (2 * math.pi) - math.pi
+    tolerance = max(2, min(6, int(round(radius * 0.04))))
+    h, w = image.shape[:2]
+    hits = []
+    # Ignore exact endpoints: wall faces and the radial leaf own those pixels.
+    for angle in np.linspace(start_angle, start_angle + delta, 37)[2:-2]:
+        hit = False
+        for dr in range(-tolerance, tolerance + 1):
+            x = int(round(hinge.x + (radius + dr) * math.cos(float(angle))))
+            y = int(round(hinge.y + (radius + dr) * math.sin(float(angle))))
+            if 0 <= x < w and 0 <= y < h and image[y, x] > 0:
+                hit = True
+                break
+        hits.append(hit)
+    return float(np.mean(hits)) if hits else 0.0
+
+
+def _room_side_labels(
+    room_instances: np.ndarray,
+    wall: Wall,
+    hinge: Point,
+    config,
+) -> tuple[int, int]:
+    cl = wall.centerline
+    length = max(cl.length, 1e-6)
+    ux = (cl.end.x - cl.start.x) / length
+    uy = (cl.end.y - cl.start.y) / length
+    offset = max(config.door_arc_min_radius_px * 0.28,
+                 wall.thickness * 0.9)
+    sample_radius = max(3, int(round(config.door_arc_min_radius_px * 0.12)))
+    labels = []
+    h, w = room_instances.shape[:2]
+    for sign in (-1.0, 1.0):
+        x = int(round(hinge.x - sign * offset * uy))
+        y = int(round(hinge.y + sign * offset * ux))
+        x0, x1 = max(0, x - sample_radius), min(w, x + sample_radius + 1)
+        y0, y1 = max(0, y - sample_radius), min(h, y + sample_radius + 1)
+        values = room_instances[y0:y1, x0:x1].ravel()
+        values = values[values > 0]
+        if values.size:
+            counts = np.bincount(values.astype(np.int32))
+            labels.append(int(np.argmax(counts)))
+        else:
+            labels.append(0)
+    return labels[0], labels[1]
+
+
+def _nearest_hough_center_ratio(
+    circles: list[tuple[float, float, float]],
+    hinge: Point,
+    radius: float,
+) -> float:
+    compatible = [circle for circle in circles
+                  if 0.45 <= circle[2] / radius <= 1.60]
+    if not compatible:
+        return math.inf
+    return min(math.hypot(cx - hinge.x, cy - hinge.y) / radius
+               for cx, cy, _ in compatible)
+
+
+def _far_jamb_ratio(
+    walls: list[Wall],
+    supporting: Wall,
+    hinge: Point,
+    radius: float,
+    closed_angle: float,
+) -> float:
+    target = Point(
+        hinge.x + radius * math.cos(closed_angle),
+        hinge.y + radius * math.sin(closed_angle),
+    )
+    axis = supporting.centerline.angle_rad
+    best = math.inf
+    for wall in walls:
+        if wall is supporting:
+            continue
+        error = abs((wall.centerline.angle_rad - axis + math.pi / 2)
+                    % math.pi - math.pi / 2)
+        if error > math.radians(12):
+            continue
+        best = min(best, wall.centerline.start.distance_to(target),
+                   wall.centerline.end.distance_to(target))
+    return best / max(radius, 1e-6)
 
 
 def _nearby_walls(center: Point, walls, config) -> list[Wall]:

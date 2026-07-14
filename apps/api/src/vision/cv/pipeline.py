@@ -32,6 +32,20 @@ from .models import CVTakeoffResult, PipelineError, PipelineState
 
 logger = logging.getLogger("flowbuildr.cv.pipeline")
 
+
+def _preliminary_room_extraction(state: PipelineState) -> PipelineState:
+    """Provide room-side topology to opening detectors, without making it fatal.
+
+    The authoritative room pass still runs after doors have repaired/split the
+    wall network. Plans whose preliminary wall graph is not yet segmentable
+    therefore keep the previous behavior and simply skip topology-based repair.
+    """
+    try:
+        return room_extraction.run(state)
+    except PipelineError as exc:
+        state.debug.messages.append(f"preliminary room extraction skipped: {exc}")
+        return state
+
 _STAGES = [
     ("01_preprocessing", preprocessing.run),
     ("02_structural_roi", structural_roi.run),
@@ -42,6 +56,7 @@ _STAGES = [
     ("07_line_filters_clean", line_filters.run),
     ("08_wall_extraction", wall_extraction.run),
     ("09_junction_snapping", junction_snapping.run),
+    ("09b_preliminary_room_extraction", _preliminary_room_extraction),
     ("10_door_detection", door_detection.run),
     ("11_room_extraction", room_extraction.run),
     ("12_window_detection", window_detection.run),

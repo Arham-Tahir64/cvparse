@@ -1369,3 +1369,85 @@ Proposed coupled change:
   source evidence separates it from the two top false positives removed in
   Cycle 17; otherwise document the missing semantic signal as the technical
   stopping condition rather than adding a reference-specific rule.
+
+### Cycle 18 not retained: no independent top-window source signal
+
+- The reference component registers to native coordinates `(2479,1631)`--
+  `(2770,1664)`. The supplied plan shows a continuous hatched exterior wall in
+  that interval: no wall break, repeated frame pair, window tag, schedule mark,
+  or OCR cue distinguishes it from ordinary shell wall.
+- Nearby PDF/raster evidence consists of one 581 px wall face, a shorter grid
+  stroke, and a dimension stroke. Promoting any of these would either recreate
+  the two unsupported top windows removed in Cycle 17 or encode the reference
+  location directly. No source change was retained.
+
+### Cycle 19 goal: repair truncated door arcs with structural topology
+
+- Several reference door sectors are source-visible but absent because wall
+  erasure leaves only short Hough fragments. A radius/threshold expansion alone
+  detected the fragments with incorrect hinges/quadrants and reduced direct
+  door IoU from 0.2469 as low as 0.1650.
+- Proposed redesign: keep the current high-precision Hough path, then allow a
+  repair only at a paired wall endpoint that separates two preliminary room
+  instances, has an opposite collinear jamb, and is corroborated by a nearby
+  Hough response. Recompute the authoritative rooms after repaired doors split
+  the wall network.
+
+### Cycle 19 retained: room-topology-gated endpoint door repair
+
+- Root cause: the original detector required one contiguous Hough arc to supply
+  both the hinge and the sector endpoints. Wall erasure and overlapping wall
+  faces can preserve door-specific evidence while shifting/truncating that arc.
+- Change: the pipeline now performs a non-fatal preliminary room pass before
+  doors. The repair pass samples partial quarter-arcs only at paired-face wall
+  endpoints and requires all of: distinct nonzero room instances on opposite
+  wall sides, normal continuation/opening/leaf geometry, an opposite jamb
+  within 0.10 leaf radii, and a compatible Hough center within 0.30 radii. The
+  final room pass is rerun after door wall-splitting. Same-room fixture geometry
+  is explicitly rejected by tests.
+- The conservative gate adds exactly one source-supported doorway. Full
+  rendered door IoU improves 0.2425 -> 0.2725, recall 0.3118 -> 0.3640, F1
+  0.3903 -> 0.4283, and direct-mask door IoU 0.2469 -> 0.2765. Macro IoU
+  improves 0.5768 -> 0.5837 and foreground IoU 0.8735 -> 0.8737.
+- Room IoU remains 0.8002. Window IoU changes 0.5809 -> 0.5789 and wall IoU
+  0.6836 -> 0.6831 from semantic ownership at the added door; direct window and
+  room masks are pixel-identical, while the wall mask moves only at the repaired
+  opening. The door/macro/foreground gain is materially larger than this local
+  class-ownership change.
+- Both protected cases are unchanged: measurement crop wall IoU 0.8034, room
+  IoU 0.9393, 0 vertical / 2 horizontal residual barrier pixels; restored-wall
+  crop wall IoU 0.5483, boundary F1 0.7509, room IoU 0.6618.
+- Files changed: `pipeline.py`, `config.py`, `door_detection.py`, door and
+  end-to-end tests, and this log. Commands: Hough/radius sweep, endpoint and
+  quadrant reconstruction prototype, tangent/sector-ink/jamb/room-topology
+  ablations, cached downstream run, direct and rendered evaluators, focused
+  evaluator, 183-test CV suite, and full OCR-enabled uncached CLI.
+- Full uncached run: 401.0 s, 116 walls, 8 doors, 4 windows, 9/9 labeled rooms,
+  and 12 gaps. Output: `debug_output/highlight_cycle19_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle19_full.json`; masks:
+  `debug_output/highlight_cycle19_full_intermediates/13_semantic_masks/`; seven-
+  layer highlighted-region crops: `debug_output/focus_cycle19_full/`.
+
+### Cycle 20 goal: recover the remaining exterior-side door sectors
+
+- Inspect the latest output against the goal and determine whether the two
+  clearest remaining missing sectors can pass a symmetric source-evidence rule
+  without reopening the fixture false positives rejected in Cycle 19.
+
+### Cycle 20 not retained: remaining source cues are not separable rule-wise
+
+- Tested full and partial Hough radius expansion, original/cleaned rasters,
+  wall-endpoint seeding, four quadrant assignments, tangent-aligned arc support,
+  sector ink, wall thickness/length, opposite-jamb distance, Hough-center
+  proximity, and preliminary room-side labels. Individual goal-guided choices
+  can overlap each missing sector, but the same feature ranges rank hatch,
+  fixture, and dimension intersections higher elsewhere on this plan.
+- The two remaining clear misses either have a zero/unlabeled room side or lack
+  a recovered opposite jamb. Relaxing either retained constraint adds 9--22
+  false candidates and reduces aggregate door IoU. Larger-circle experiments
+  also produced zero-overlap sectors with 929--1,469 false pixels each.
+- No Cycle 20 code was retained. Together with the Cycle 18 top-window audit,
+  the remaining semantic differences require labeled examples for a learned
+  opening detector/segmenter, richer CAD layer/object metadata, or manual
+  labels. Further single-plan rules would be reference-specific and violate the
+  generalization constraint, which is the final stopping condition.

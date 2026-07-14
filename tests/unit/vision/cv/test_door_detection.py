@@ -214,3 +214,48 @@ def test_original_leaf_evidence_survives_structural_cleanup():
 
     assert len(state.doors) == 1
     assert state.doors[0].confidence > 0
+
+
+def _endpoint_repair_state(same_room=False):
+    binary = np.zeros((400, 600), np.uint8)
+    binary[191:210, 50:251] = 255
+    binary[191:210, 300:551] = 255
+    # Only half of the swing survives, so this is endpoint-repair evidence
+    # rather than a normal complete quarter-circle proposal.
+    cv2.ellipse(binary, (250, 200), (50, 50), 0, 0, 45, 255, 2)
+    cv2.line(binary, (250, 200), (250, 250), 255, 2)
+    state = make_state([
+        wall("W0001", 50, 200, 250, 200, thickness=19),
+        wall("W0002", 300, 200, 550, 200, thickness=19),
+    ], binary)
+    state.config = PipelineConfig(
+        door_arc_min_radius_px=20.0,
+        door_arc_max_radius_px=60.0,
+    )
+    state.semantic_plan_mask = np.full(binary.shape, 255, np.uint8)
+    state.room_instance_mask = np.ones(binary.shape, np.int32)
+    if not same_room:
+        state.room_instance_mask[210:, :] = 2
+    return state, binary
+
+
+def test_endpoint_repair_requires_room_boundary_and_opposite_jamb():
+    state, binary = _endpoint_repair_state()
+
+    repairs = door_detection._endpoint_repair_candidates(
+        state, binary, binary, [(255.0, 200.0, 50.0)], [],
+    )
+
+    assert len(repairs) == 1
+    assert repairs[0][6].distance_to(Point(250, 200)) < 1
+    assert repairs[0][1] == 50
+
+
+def test_endpoint_repair_rejects_fixture_inside_one_room():
+    state, binary = _endpoint_repair_state(same_room=True)
+
+    repairs = door_detection._endpoint_repair_candidates(
+        state, binary, binary, [(255.0, 200.0, 50.0)], [],
+    )
+
+    assert repairs == []

@@ -167,6 +167,17 @@ class PipelineConfig:
     door_min_wall_continuation: float = 0.35
     door_max_opening_support: float = 0.52
     door_min_leaf_support: float = 0.18
+    # Conservative repair pass for quarter-arcs damaged by wall erasure. A
+    # candidate must be anchored to a paired wall endpoint between two room
+    # instances, corroborated by an opposite jamb and a nearby Hough response.
+    door_repair_arc_support_min: float = 0.30
+    door_repair_arc_support_max: float = 0.55
+    door_repair_min_geometry_score: float = 0.78
+    door_repair_min_wall_thickness_ratio: float = 0.20
+    door_repair_max_hough_center_ratio: float = 0.30
+    door_repair_max_far_jamb_ratio: float = 0.10
+    door_repair_existing_hinge_ratio: float = 0.85
+    door_repair_dedup_dist_px: float = 45.0
     door_split_t_min: float = 0.1              # split only if hinge parameter in (min, max)
     door_split_t_max: float = 0.9
     door_window_conflict_radius_ratio: float = 0.65
