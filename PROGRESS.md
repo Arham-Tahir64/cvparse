@@ -1322,3 +1322,50 @@ Proposed coupled change:
   frame candidates, while preserving the two-source and three-line tolerant
   fallbacks. Retain only if the false top window disappears and all five
   source-supported openings remain.
+
+### Cycle 17 retained: require corroborated frame geometry for export
+
+- Root cause: production allowed `window_min_parallel_lines=1`, so one exact
+  inner stroke could become a semantic window. The two false top candidates
+  each depended on a single contained line; the retained left and bottom
+  openings all have two source-paired or three repeated, length-consistent
+  offsets when small endpoint overruns are included.
+- Change: strict frame candidates now combine exact intervals only with
+  source-provenance overrun faces, then require at least two distinct,
+  overlapping, 0.80 length-consistent offsets. The existing two-source and
+  three-repeated-line tolerant fallbacks are unchanged. Uncorroborated spans
+  remain provisional only through door/window conflict resolution—preserving
+  the useful suppression of fixture door `D0005`—and are removed before final
+  window export.
+- The output now contains exactly the left exterior window and all three
+  bottom windows; both false top windows and the previously shifted bottom
+  candidate are absent. Door count remains seven.
+- Full rendered results versus Cycle 16: wall IoU 0.6694 -> 0.6836, door IoU
+  0.2424 -> 0.2425, window IoU 0.4892 -> 0.5809, macro IoU 0.5504 -> 0.5768,
+  and window precision 0.6432 -> 0.8111. The direct room mask is pixel-identical;
+  its rendered 0.8004 -> 0.8002 difference and foreground 0.8737 -> 0.8735
+  are ownership/anti-alias effects from restoring wall under false windows.
+- Both protected cases improve or hold. Measurement crop wall IoU 0.8033 ->
+  0.8034 with room IoU 0.9393 and 0 vertical / 2 horizontal residual barriers.
+  Restored-wall crop wall IoU improves 0.4528 -> 0.5483, boundary F1 0.7394 ->
+  0.7509, while room IoU remains 0.6618.
+- Files changed: `window_detection.py`, window unit tests, and this log.
+  Commands: exact/tolerant provenance audit, provisional-conflict experiment,
+  cached downstream run, direct room-mask comparison, 181-test CV suite, full
+  OCR-enabled uncached CLI, whole-image evaluator, focused evaluator, and
+  opening crop exporter.
+- Full uncached run: 374.8 s, 116 walls, 7 doors, 4 windows, 9/9 labeled rooms,
+  and 11 gaps. Output: `debug_output/highlight_cycle17_full.{pdf,png}`;
+  metrics: `evaluation_output/highlight_cycle17_full.json`; masks:
+  `debug_output/highlight_cycle17_full_intermediates/13_semantic_masks/`;
+  focused artifacts: `debug_output/cycle17_opening_audit/`.
+
+### Cycle 18 goal: recover the remaining true guest-suite top window
+
+- The only substantial exterior-window false negative is the top guest-suite
+  span. Register its reference component to native 7200x4800 coordinates and
+  audit PDF vectors, classified strokes, nearby wall-face discontinuities,
+  window tags, and schedule cues in that interval. Implement recovery only if
+  source evidence separates it from the two top false positives removed in
+  Cycle 17; otherwise document the missing semantic signal as the technical
+  stopping condition rather than adding a reference-specific rule.

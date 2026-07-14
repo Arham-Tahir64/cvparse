@@ -53,6 +53,32 @@ def test_inner_line_window():
     assert window_gaps[0].wall_break_score == 1.0
 
 
+def test_single_exact_line_needs_length_consistent_frame_partner():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    exact = seg(150, 200, 250, 200, sid="exact")
+    unrelated_face = seg(97, 180, 348, 180, sid="long")
+    state = make_state([w], [exact, unrelated_face])
+    state.config.window_min_parallel_lines = 1
+
+    window_detection.run(state)
+
+    assert state.windows == []
+    assert state.debug.segment_counts["08_uncorroborated_windows"] == 1
+
+
+def test_exact_line_can_pair_with_consistent_small_overrun():
+    w = wall("W0001", 100, 200, 350, 200, thickness=50)
+    w.source_ids = ["overrun"]
+    exact = seg(102, 180, 348, 180, sid="exact")
+    overrun = seg(97, 220, 352, 220, sid="overrun")
+    state = make_state([w], [exact, overrun])
+    state.config.window_min_parallel_lines = 1
+
+    window_detection.run(state)
+
+    assert len(state.windows) == 1
+
+
 def test_common_five_foot_window_is_within_search_scale():
     config = PipelineConfig()
     assert config.window_gap_min_px < 250 < config.window_gap_max_px

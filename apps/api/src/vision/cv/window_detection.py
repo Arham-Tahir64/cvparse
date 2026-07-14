@@ -33,6 +33,7 @@ def run(state: PipelineState) -> PipelineState:
     gap_id_gen = IdGenerator("G", start=len(state.gaps) + 1)
 
     windows: list[Window] = []
+    weak_window_ids: set[str] = set()
     covered_walls: set[str] = set()
 
     # Strategy A - inner-line matching
@@ -45,7 +46,8 @@ def run(state: PipelineState) -> PipelineState:
         tree = cKDTree([[s.midpoint.x, s.midpoint.y] for s in inner_candidates])
         for wall in state.walls:
             found = _inner_line_windows(
-                wall, inner_candidates, tree, config, window_id_gen, gap_id_gen, state
+                wall, inner_candidates, tree, config, window_id_gen, gap_id_gen,
+                state, weak_window_ids,
             )
             if found:
                 covered_walls.add(wall.id)
@@ -61,6 +63,7 @@ def run(state: PipelineState) -> PipelineState:
 
     state.windows = windows
     _resolve_door_window_conflicts(state)
+    _filter_uncorroborated_windows(state, weak_window_ids)
     _filter_nontangent_windows(state)
     _deduplicate_windows(state)
     state.debug.segment_counts["08_windows"] = len(state.windows)
@@ -111,6 +114,32 @@ def _resolve_door_window_conflicts(state: PipelineState) -> None:
         )
     ]
     state.debug.segment_counts["08_door_window_conflicts"] = len(conflicts)
+
+
+def _filter_uncorroborated_windows(
+    state: PipelineState, weak_window_ids: set[str],
+) -> None:
+    """Remove single-line frame proposals after they serve conflict evidence."""
+    rejected = [
+        window for window in state.windows if window.id in weak_window_ids
+    ]
+    rejected_keys = {(window.wall_id, window.position.x, window.position.y)
+                     for window in rejected}
+    state.windows = [
+        window for window in state.windows if window.id not in weak_window_ids
+    ]
+    state.gaps = [
+        gap for gap in state.gaps
+        if not (
+            gap.kind == "window"
+            and any(
+                gap.wall_id == wall_id
+                and gap.center.distance_to(Point(x, y)) <= 2.0
+                for wall_id, x, y in rejected_keys
+            )
+        )
+    ]
+    state.debug.segment_counts["08_uncorroborated_windows"] = len(rejected)
 
 
 def _filter_nontangent_windows(state: PipelineState) -> None:
@@ -240,7 +269,10 @@ def _deduplicate_windows(state: PipelineState) -> None:
 # Strategy A
 # ---------------------------------------------------------------------------
 
-def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_gen, state):
+def _inner_line_windows(
+    wall, candidates, tree, config, window_id_gen, gap_id_gen, state,
+    weak_window_ids: set[str] | None = None,
+):
     cl = wall.centerline
     query_radius = cl.length / 2.0 + config.window_gap_max_px
     idx = tree.query_ball_point([cl.midpoint.x, cl.midpoint.y], query_radius)
@@ -283,9 +315,16 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
     # is only a fallback for a paired frame whose anti-aliased faces both
     # overrun a synthesized wall endpoint by a few pixels. Corroborating faces
     # must overlap, occupy distinct offsets, and have similar span lengths.
+    # A single contained stroke can be a hatch, fixture edge, or wall-face
+    # fragment. Corroborate strict intervals with any aligned small-overrun
+    # face before accepting the frame; real frames remain paired even when one
+    # anti-aliased endpoint falls just outside the synthesized wall.
+    strict_evidence = _corroborated_tolerant_intervals(
+        [*exact_intervals, *source_tolerant_intervals], config,
+    )
     merged = _frame_clusters(
-        exact_intervals, config.window_merge_overlap_ratio,
-        config.window_min_parallel_lines,
+        strict_evidence, config.window_merge_overlap_ratio,
+        max(2, config.window_min_parallel_lines),
     )
     if not merged:
         source_corroborated = _corroborated_tolerant_intervals(
@@ -306,6 +345,14 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
             max(config.window_repeated_frame_min_lines,
                 config.window_min_parallel_lines),
         )
+    weak = False
+    if not merged and exact_intervals:
+        # Preserve the old one-line proposal only long enough to refute a
+        # coincident door/fixture arc. It is removed before semantic export.
+        merged = _frame_clusters(
+            exact_intervals, config.window_merge_overlap_ratio, 1,
+        )
+        weak = bool(merged)
     results = []
     for t0, t1 in merged:
         center = point_at_param(cl.start, cl.end, (t0 + t1) / 2.0)
@@ -313,6 +360,8 @@ def _inner_line_windows(wall, candidates, tree, config, window_id_gen, gap_id_ge
             continue
         width = (t1 - t0) * cl.length
         window = Window(id=window_id_gen(), position=center, width=width, wall_id=wall.id)
+        if weak and weak_window_ids is not None:
+            weak_window_ids.add(window.id)
         results.append(window)
         state.gaps.append(_gap_record(gap_id_gen(), wall, center, width, 1.0))
     return results
