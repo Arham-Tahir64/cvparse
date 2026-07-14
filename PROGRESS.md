@@ -1011,3 +1011,65 @@ Proposed coupled change:
   source-supported geometry or class-ownership change that improves the full
   annotation without regressing walls, windows, rooms, or either structural
   crop.
+
+### Cycle 9 not retained: door geometry evidence remains ambiguous
+
+- Per-sector scoring found strong doors (precision 0.924, 0.997, and 0.875),
+  several partial sectors, and one zero-overlap fixture-derived sector. Some
+  alternate quadrants overlap the goal better, but the original arc/leaf ink
+  does not consistently support those flips: hinge-centred radial support is
+  absent for one strong door and prefers the wrong side for another. A quadrant
+  rule based on the supplied goal would therefore be image-specific.
+- A goal-matched pink/0.62 door palette was rejected because door IoU fell
+  0.2323 -> 0.2220 and macro IoU fell 0.4927 -> 0.4913 through ambiguity with
+  the mechanical-room fill.
+- A topology-safe room-ownership sweep clipped sectors to dilated detected room
+  space at 0/5/10/20/30 px, then moved the clipping before wall subtraction and
+  swept 20/30/40/50/60/80 px. The best door result (0.2412) regressed wall IoU
+  0.6465 -> 0.6439 and foreground IoU 0.8734 -> 0.8725. The only non-regressing
+  allowance changed door by just +0.0006 while reducing window ownership by
+  0.0001. These variants were not meaningful and were fully reverted.
+- Goal not achieved within the current geometric detector. No source or test
+  file from Cycle 9 was retained or committed.
+
+### Cycle 10 goal: distinguish remaining exterior-window candidates
+
+- Audit exact window objects after clean semantic export. Determine whether
+  style, shell context, physical wall opening, or source frame evidence can
+  eliminate false candidates and recover missing top/left windows without
+  reducing either high-quality bottom window.
+
+### Cycle 10 not retained: remaining window cues are not separable
+
+- A goal-matched blue/0.62 palette left window IoU and macro IoU unchanged at
+  0.2919 and 0.4927, with only +/-0.0001 ownership noise. It was reverted as a
+  cosmetic-only change.
+- Individual exact-mask precision is 0.846 and 0.869 for two correct bottom
+  windows; two top-shell candidates have zero truth overlap, and a third bottom
+  candidate is materially mislocalized (precision 0.014). All survivors already
+  satisfy framed-line, exterior room context, shell proximity, tangency, and
+  source-face requirements. Prior physical-gap audits also measured identical
+  closed-face support for true and false candidates.
+- Removing the low-overlap candidates would improve precision on this sheet but
+  would neither recover the missing top/left windows nor follow a feature that
+  generalizes to other plans. No Cycle 10 source change was retained.
+
+### Final stopping condition after Cycle 10
+
+- The final retained annotation is Cycle 8. Both requested highlighted cases
+  remain fixed together: the recreation room is continuous (room IoU 0.9393;
+  0 vertical and 2 horizontal residual barrier pixels), and the restored-wall
+  crop remains at wall IoU 0.4528 / boundary F1 0.7394 without reintroducing the
+  measurement-line wall.
+- Whole-image final metrics are wall 0.6465, door 0.2323, window 0.2919, room
+  0.7999, macro 0.4927, and foreground 0.8734. The output contains nine stable
+  semantic room classes and no diagnostic vectors in the final annotation.
+- Meaningful deviations remain in door swing quadrant/localization, the missing
+  top/left windows, one mislocalized bottom window, and local wall alignment or
+  thickness. Repeated detector, confidence, quadrant, leaf, palette, shell,
+  physical-gap, and topology-ownership experiments could not reduce these
+  errors without regressing another class or using goal-specific choices.
+- Further progress requires multiple labeled plans for a trained semantic/
+  instance model (especially door/window examples), or original CAD/PDF layer
+  metadata that identifies object semantics. Those resources are unavailable
+  in this project, satisfying the requested technical stopping condition.
