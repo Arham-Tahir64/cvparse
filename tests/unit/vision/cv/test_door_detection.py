@@ -66,6 +66,18 @@ def test_common_scaled_door_radius_is_within_search_defaults():
     assert config.hough_circles_param2 <= 25
 
 
+def test_circle_center_must_remain_within_one_radius_of_snapped_hinge():
+    config = PipelineConfig()
+    hinge = Point(100, 100)
+
+    assert door_detection._hinge_center_offset_valid(
+        Point(100, 140), hinge, 50, config.door_max_hinge_offset_ratio,
+    )
+    assert not door_detection._hinge_center_offset_valid(
+        Point(100, 160), hinge, 50, config.door_max_hinge_offset_ratio,
+    )
+
+
 def test_full_circle_rejected():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 50:550] = 255

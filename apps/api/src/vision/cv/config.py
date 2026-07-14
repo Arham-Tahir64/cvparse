@@ -160,6 +160,10 @@ class PipelineConfig:
     arc_coverage_max: float = 0.40
     door_dedup_dist_px: float = 24.0           # hinge distance for deduplication
     door_axis_angle_tol_deg: float = 35.0
+    # Hough circle centres should coincide with the hinge after snapping to the
+    # supporting wall. Allow raster/arc truncation, but reject a centre farther
+    # from the hinge than nearly one leaf radius.
+    door_max_hinge_offset_ratio: float = 0.90
     door_min_wall_continuation: float = 0.35
     door_max_opening_support: float = 0.52
     door_min_leaf_support: float = 0.18

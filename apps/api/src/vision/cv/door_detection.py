@@ -279,6 +279,10 @@ def _candidate_geometry(
 
     t = min(1.0, max(0.0, project_param(Point(cx, cy), cl.start, cl.end)))
     hinge = point_at_param(cl.start, cl.end, t)
+    if not _hinge_center_offset_valid(
+        Point(cx, cy), hinge, radius, config.door_max_hinge_offset_ratio,
+    ):
+        return None
     opening_sign = 1.0 if (math.cos(closed_angle) * ux +
                            math.sin(closed_angle) * uy) >= 0 else -1.0
     inset = max(5.0, wall.thickness * 0.7)
@@ -315,6 +319,13 @@ def _candidate_geometry(
     score = (0.30 * continuation + 0.30 * (1.0 - opening) +
              0.25 * leaf_support + 0.15 * max(0.0, alignment))
     return score, hinge, swing_end, swing_arc
+
+
+def _hinge_center_offset_valid(
+    circle_center: Point, hinge: Point, radius: float, max_ratio: float,
+) -> bool:
+    """Return whether a swing-circle centre plausibly represents its hinge."""
+    return radius > 0 and circle_center.distance_to(hinge) <= radius * max_ratio
 
 
 def _structural_wall_support(

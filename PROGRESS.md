@@ -1073,3 +1073,46 @@ Proposed coupled change:
   instance model (especially door/window examples), or original CAD/PDF layer
   metadata that identifies object semantics. Those resources are unavailable
   in this project, satisfying the requested technical stopping condition.
+
+### Cycle 11 goal: remove duplicate and off-centre door annotations
+
+- A new surgical opening audit exported source/goal/current/difference panels
+  for every detected door and window plus every substantial reference component
+  in `debug_output/cycle11_opening_audit/`. It found two detections on the same
+  guest-suite doorway only about 31 px apart.
+- Root cause: Hough confidence did not account for the distance between the
+  proposed circle centre and the hinge after snapping to the supporting wall.
+  The higher-scored duplicate had a centre-to-hinge offset 1.355 times its
+  radius, which is physically impossible for a swing circle. The retained
+  detection on that opening has an offset ratio 0.524. Other nearby laundry
+  doors are distinct openings and remain under the 0.90 validity limit.
+- Change: door candidates now require the Hough centre to remain within 0.90
+  leaf radii of the snapped hinge. The check is scale-normalized, tied to door
+  geometry, and contains no coordinates or labels from the supplied goal.
+- Full rendered results versus Cycle 8: wall IoU 0.6465 -> 0.6476, door IoU
+  0.2323 -> 0.2342, window IoU 0.2919 -> 0.2923, room IoU 0.7999 -> 0.8001,
+  macro IoU 0.4927 -> 0.4935, and foreground IoU 0.8734 -> 0.8736. Door
+  precision improves 0.4961 -> 0.5062; exported doors fall from 8 to 7 and
+  door gaps from 13 to 12.
+- Both protected structural cases remain exact: measurement crop wall IoU
+  0.7169, room IoU 0.9393, 0 vertical / 2 horizontal residual barriers;
+  restored-wall crop wall IoU 0.4528, boundary F1 0.7394, room IoU 0.6618.
+- Files changed: `config.py`, `door_detection.py`, door unit tests, and this
+  log. Commands: per-opening crop export, individual door/window scorer,
+  targeted and full CV tests, cached downstream run, full uncached CLI,
+  whole-image evaluator, and focused structural evaluator.
+- Tests: 172 passed. Full uncached run: 369.8 s, 116 walls, 7 doors, 5 windows,
+  9/9 labeled rooms, and 12 gaps. Output:
+  `debug_output/highlight_cycle11_full.{pdf,png}`; metrics:
+  `evaluation_output/highlight_cycle11_full.json`; masks:
+  `debug_output/highlight_cycle11_full_intermediates/13_semantic_masks/`;
+  per-opening crops: `debug_output/cycle11_opening_audit/`.
+
+### Cycle 12 goal: recover the mislocalized third bottom window
+
+- The opening audit shows two bottom windows with strong individual precision
+  (0.846 and 0.869), while the third detected bottom window is shifted right
+  and undersized (precision 0.014). Inspect the source frame-line proposals and
+  merge/alignment logic on the same supporting wall. Recover the complete third
+  span from repeated frame boundaries without changing the two correct spans,
+  top/left wall ownership, room masks, or the Cycle 11 door improvement.
