@@ -151,6 +151,15 @@ def test_no_circles_no_doors_no_error():
     assert state.doors == []
 
 
+def test_diagonal_sector_snaps_to_existing_cardinal_quadrant():
+    closed, leaf = door_detection._snap_sector_to_cardinal_quadrant(
+        math.radians(225), math.radians(135),
+    )
+
+    assert math.degrees(closed) == 180
+    assert math.degrees(leaf) == 90
+
+
 def test_split_children_carry_provenance():
     binary = np.zeros((400, 600), np.uint8)
     binary[196:205, 100:500] = 255

@@ -1253,3 +1253,72 @@ Proposed coupled change:
   window validity and deduplication checks, then evaluate the restored door's
   source support and goal overlap. Retain only if door metrics improve without
   changing the accepted window, wall, or room masks.
+
+### Cycle 15 not retained: provisional conflict suppresses a false door
+
+- Reordering conflict resolution restored `D0005`, but its exported sector has
+  only 3 true pixels and 546 false pixels (individual precision 0.005). Door
+  IoU fell 0.2350 -> 0.2229, room IoU fell 0.8001 -> 0.7974, and macro IoU
+  fell 0.5485 -> 0.5447. The change and its regression test were fully
+  reverted; no source or test file from this experiment remains.
+- The experiment confirms that the provisional framed object is useful
+  negative evidence for this fixture-derived circle even though it does not
+  survive as a window. Future conflict changes need a separate fixture-door
+  rejection before altering this ordering.
+
+### Cycle 16 goal: reject the remaining unsupported door sector
+
+- Individual sector scoring finds one retained door, `D0008`, with zero goal
+  overlap (0 true / 374 false pixels) and the lowest composite geometric
+  confidence, 0.550. The next valid door is 0.645 and the six stronger doors
+  range up to 0.968. Add an explicit minimum on the existing wall-continuation,
+  opening, leaf, and alignment composite score, then verify that it rejects
+  only this weak fixture proposal and improves door metrics without changing
+  other opening or structural classes.
+
+### Cycle 16 retained: snap diagonal-support door sectors in Manhattan plans
+
+- A direct 0.60 confidence rejection improved door IoU to 0.2441 but changed
+  wall topology and regressed wall/foreground metrics; semantic suppression
+  and room-side leaf flipping also introduced meaningful ownership regressions.
+  All three variants were rejected and removed.
+- Root cause: `D0004` is the only retained door associated with a 45.2-degree
+  diagonal fixture-derived wall in an otherwise Manhattan plan. Its hinge and
+  radius are valid, but the wall-relative sector was rotated 45 degrees.
+  Individual scoring showed the existing cardinal quadrant is correct; only
+  its rotation was wrong.
+- Change: for a door supported by a diagonal wall while Manhattan mode is
+  active, preserve the inferred leaf-side quadrant and sweep order but snap
+  the sector endpoints to cardinal axes. Hinge, radius, opening, wall split,
+  and every non-diagonal door remain unchanged. The rule contains no reference
+  coordinates or labels.
+- Full rendered results versus Cycle 14: door IoU 0.2350 -> 0.2424, door recall
+  0.3036 -> 0.3118, room IoU 0.8001 -> 0.8004, and macro IoU 0.5485 -> 0.5504.
+  Wall and foreground IoU remain 0.6694 and 0.8737. The direct 7200x4800
+  window and room masks are pixel-identical; only 57 of 633,224 wall pixels
+  move with the corrected sector. The renderer's -0.0005 window attribution
+  is therefore palette/anti-alias noise, not a detector change.
+- Both protected structural cases remain exact: measurement crop wall IoU
+  0.8033, room IoU 0.9393, 0 vertical / 2 horizontal residual barriers;
+  restored-wall crop wall IoU 0.4528, boundary F1 0.7394, room IoU 0.6618.
+- Files changed: `door_detection.py`, door unit tests, and this log. Commands:
+  individual quadrant scorer, hinge-arc and room-context audits, rejected
+  confidence/suppression/room-flip comparisons, direct mask comparison,
+  cached downstream run, 179-test CV suite, full OCR-enabled uncached CLI,
+  whole-image evaluator, focused evaluator, and opening crop exporter.
+- Full uncached run: 373.4 s, 116 walls, 7 doors, 6 windows, 9/9 labeled rooms,
+  and 13 gaps. Output: `debug_output/highlight_cycle16_full.{pdf,png}`;
+  metrics: `evaluation_output/highlight_cycle16_full.json`; masks:
+  `debug_output/highlight_cycle16_full_intermediates/13_semantic_masks/`;
+  focused artifacts: `debug_output/cycle16_opening_audit/`.
+
+### Cycle 17 goal: reject the uncorroborated top-shell window
+
+- `W0015` is accepted from one 157 px exact inner line even though its only
+  nearby paired face spans the entire 261 px wall and fails the 0.80 length
+  consistency test. Every retained source-supported window has at least two
+  overlapping, length-consistent face strokes when exact and small-overrun
+  evidence are considered together. Require that corroboration for strict
+  frame candidates, while preserving the two-source and three-line tolerant
+  fallbacks. Retain only if the false top window disappears and all five
+  source-supported openings remain.

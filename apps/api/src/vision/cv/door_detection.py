@@ -305,6 +305,10 @@ def _candidate_geometry(
     if leaf_support < config.door_min_leaf_support:
         return None
 
+    if config.manhattan and wall.orientation == "diagonal":
+        closed_angle, leaf_angle = _snap_sector_to_cardinal_quadrant(
+            closed_angle, leaf_angle,
+        )
     arc_delta = (leaf_angle - closed_angle + math.pi) % (2 * math.pi) - math.pi
     angles = np.linspace(closed_angle, closed_angle + arc_delta, 18)
     swing_arc = [Point(
@@ -319,6 +323,19 @@ def _candidate_geometry(
     score = (0.30 * continuation + 0.30 * (1.0 - opening) +
              0.25 * leaf_support + 0.15 * max(0.0, alignment))
     return score, hinge, swing_end, swing_arc
+
+
+def _snap_sector_to_cardinal_quadrant(
+    closed_angle: float, leaf_angle: float,
+) -> tuple[float, float]:
+    """Preserve a sector's quadrant/order while removing diagonal rotation."""
+    arc_delta = (leaf_angle - closed_angle + math.pi) % (2 * math.pi) - math.pi
+    # The leaf direction identifies which side of a cardinal boundary owns a
+    # diagonally rotated sector; its midpoint can lie exactly on that boundary.
+    quadrant = int((leaf_angle % (2 * math.pi)) // (math.pi / 2))
+    low = quadrant * math.pi / 2
+    high = (quadrant + 1) * math.pi / 2
+    return (low, high) if arc_delta >= 0 else (high, low)
 
 
 def _hinge_center_offset_valid(
