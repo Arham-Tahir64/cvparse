@@ -11,6 +11,8 @@ from vision.adapters.domain_annotation_adapter import (
 )
 from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
+    add_wall,
+    delete_wall,
     DomainCommandError,
     move_wall_endpoint,
     redo_last_edit,
@@ -56,6 +58,24 @@ class WallEndpointUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     x: float
     y: float
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class WallCreate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    thickness_px: float = Field(gt=0)
+    wall_type: str = Field(default="unknown", min_length=1, max_length=64)
+    snap_tolerance_px: float | None = Field(default=None, ge=0)
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class WallDelete(BaseModel):
+    expected_revision: int = Field(ge=1)
+    cascade: bool = False
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
@@ -288,6 +308,49 @@ def update_wall_endpoint(
         updated = move_wall_endpoint(
             model, wall_id=wall_id, endpoint=endpoint,
             point=Coordinate(request.x, request.y), actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.post("/{model_id}/walls")
+def create_wall(
+    model_id: str,
+    request: WallCreate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = add_wall(
+            model,
+            start=Coordinate(request.start_x, request.start_y),
+            end=Coordinate(request.end_x, request.end_y),
+            thickness_px=request.thickness_px,
+            wall_type=request.wall_type,
+            snap_tolerance_px=request.snap_tolerance_px,
+            actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.delete("/{model_id}/walls/{wall_id}")
+def remove_wall(
+    model_id: str,
+    wall_id: str,
+    request: WallDelete,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = delete_wall(
+            model, wall_id=wall_id, cascade=request.cascade, actor=request.actor,
         )
     except DomainCommandError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

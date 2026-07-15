@@ -181,5 +181,14 @@ def validate_model(model: TakeoffModel) -> list[ValidationIssue]:
                 "Room must have a positive-area polygon.", [room.id],
                 1.0, 1.0, 0.9,
             ))
+        invalidated_by = room.metadata.source.details.get(
+            "topology_invalidated_by_wall_ids", []
+        )
+        if invalidated_by:
+            issues.append(_issue(
+                model, "room.topology_stale", IssueSeverity.ERROR,
+                "Room topology must be recomputed after a structural wall edit.",
+                [room.id, *invalidated_by], 1.0, 1.0, 0.9,
+            ))
 
     return sorted(issues, key=lambda item: (-item.priority, item.code, item.id))

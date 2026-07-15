@@ -9,21 +9,28 @@ from datetime import datetime, timezone
 from .geometry import (
     distance,
     point_at_offset,
+    point_in_polygon,
+    point_on_segment,
     polygon_area,
     polygon_perimeter,
+    segments_intersect,
     transform_wall_local_point,
     wall_orientation,
     wall_polygon,
 )
 from .models import (
     ApprovalStatus,
+    ConfidenceBreakdown,
     Coordinate,
     EditEvent,
+    Node,
     ObjectMetadata,
     ObjectSourceKind,
     ReviewStatus,
     ScaleMethod,
+    SourceEvidence,
     TakeoffModel,
+    Wall,
 )
 from .validation import validate_model
 from .quantities import QuantityBasis, calculate_quantities
@@ -172,6 +179,102 @@ def _mark_manual(metadata: ObjectMetadata) -> None:
     metadata.review_status = ReviewStatus.NEEDS_REVIEW
     metadata.locked = False
     metadata.revision += 1
+
+
+def _manual_created_metadata(operation: str) -> ObjectMetadata:
+    return ObjectMetadata(
+        source=SourceEvidence(
+            kind=ObjectSourceKind.MANUAL_CREATED,
+            stage="human_edit",
+            details={"operation": operation},
+        ),
+        confidence=ConfidenceBreakdown(
+            overall=1.0,
+            geometry_quality=1.0,
+            association=1.0,
+            topology_consistency=1.0,
+        ),
+        review_status=ReviewStatus.NEEDS_REVIEW,
+    )
+
+
+def _within_image(model: TakeoffModel, point: Coordinate) -> bool:
+    return (
+        math.isfinite(point.x)
+        and math.isfinite(point.y)
+        and point.x >= 0
+        and point.y >= 0
+        and (model.source.image_width <= 0 or point.x <= model.source.image_width)
+        and (model.source.image_height <= 0 or point.y <= model.source.image_height)
+    )
+
+
+def _nearest_node(
+    model: TakeoffModel, point: Coordinate, tolerance: float,
+) -> Node | None:
+    candidates = [
+        (distance(node.point, point), node.id, node)
+        for node in model.nodes
+        if distance(node.point, point) <= tolerance
+    ]
+    return min(candidates, default=(0.0, "", None))[2]
+
+
+def _wall_affects_room(wall: Wall, polygon: list[Coordinate]) -> bool:
+    midpoint = Coordinate(
+        (wall.start.x + wall.end.x) / 2.0,
+        (wall.start.y + wall.end.y) / 2.0,
+    )
+    return point_in_polygon(midpoint, polygon) or any(
+        point_on_segment(vertex, wall.start, wall.end, max(1e-6, wall.thickness_px / 2))
+        for vertex in polygon
+    )
+
+
+def _invalidate_room_topology(room, wall_id: str) -> None:
+    _mark_manual(room.metadata)
+    invalidated = set(
+        room.metadata.source.details.get("topology_invalidated_by_wall_ids", [])
+    )
+    invalidated.add(wall_id)
+    room.metadata.source.details["topology_invalidated_by_wall_ids"] = sorted(invalidated)
+
+
+def _resolve_room_wall_invalidation(room, wall_id: str) -> bool:
+    invalidated = set(
+        room.metadata.source.details.get("topology_invalidated_by_wall_ids", [])
+    )
+    if wall_id not in invalidated:
+        return False
+    invalidated.remove(wall_id)
+    if invalidated:
+        room.metadata.source.details["topology_invalidated_by_wall_ids"] = sorted(
+            invalidated
+        )
+    else:
+        room.metadata.source.details.pop("topology_invalidated_by_wall_ids", None)
+    _mark_manual(room.metadata)
+    return True
+
+
+def _rebuild_wall_connectivity(model: TakeoffModel) -> None:
+    nodes = {node.id: node for node in model.nodes}
+    walls = {wall.id: wall for wall in model.walls}
+    for node in model.nodes:
+        node.connected_wall_ids = []
+    for wall in model.walls:
+        for node_id in (wall.start_node_id, wall.end_node_id):
+            if node_id in nodes:
+                nodes[node_id].connected_wall_ids.append(wall.id)
+    for node in model.nodes:
+        node.connected_wall_ids = sorted(set(node.connected_wall_ids))
+    for wall in model.walls:
+        connected: set[str] = set()
+        for node_id in (wall.start_node_id, wall.end_node_id):
+            if node_id in nodes:
+                connected.update(nodes[node_id].connected_wall_ids)
+        connected.discard(wall.id)
+        wall.connected_wall_ids = sorted(item for item in connected if item in walls)
 
 
 def _wall_by_id(model: TakeoffModel, wall_id: str):
@@ -336,6 +439,227 @@ def move_wall_endpoint(
             "node_id": node_id,
             "before": {"x": old_point.x, "y": old_point.y},
             "after": {"x": point.x, "y": point.y},
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def add_wall(
+    model: TakeoffModel,
+    *,
+    start: Coordinate,
+    end: Coordinate,
+    thickness_px: float,
+    wall_type: str = "unknown",
+    snap_tolerance_px: float | None = None,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Create one constrained wall and update reciprocal graph connectivity."""
+    _ensure_editable(model)
+    if not _within_image(model, start) or not _within_image(model, end):
+        raise DomainCommandError("wall endpoints must be finite and within the plan image")
+    if not math.isfinite(thickness_px) or thickness_px <= 0:
+        raise DomainCommandError("wall thickness must be a positive finite number")
+    if not wall_type.strip():
+        raise DomainCommandError("wall type is required")
+    tolerance = (
+        max(2.0, thickness_px * 0.75)
+        if snap_tolerance_px is None else snap_tolerance_px
+    )
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise DomainCommandError("snap tolerance must be a non-negative finite number")
+
+    updated = _prepare_edit(model)
+    start_node = _nearest_node(updated, start, tolerance)
+    end_node = _nearest_node(updated, end, tolerance)
+    start_created = start_node is None
+    end_created = end_node is None
+    if start_node is None:
+        start_node = Node(
+            id=f"node_manual_{uuid.uuid4().hex}", point=start,
+            connected_wall_ids=[], metadata=_manual_created_metadata("add_wall"),
+        )
+        updated.nodes.append(start_node)
+    if end_node is None:
+        end_node = Node(
+            id=f"node_manual_{uuid.uuid4().hex}", point=end,
+            connected_wall_ids=[], metadata=_manual_created_metadata("add_wall"),
+        )
+        updated.nodes.append(end_node)
+    if start_node.id == end_node.id:
+        raise DomainCommandError("wall endpoints snap to the same graph node")
+
+    snapped_start, snapped_end = start_node.point, end_node.point
+    length_px = distance(snapped_start, snapped_end)
+    if length_px < max(1.0, thickness_px * 0.25):
+        raise DomainCommandError("wall is too short relative to its thickness")
+    for existing in updated.walls:
+        if {existing.start_node_id, existing.end_node_id} == {
+            start_node.id, end_node.id,
+        }:
+            raise DomainCommandError(f"wall duplicates existing wall {existing.id}")
+        if segments_intersect(
+            snapped_start, snapped_end, existing.start, existing.end,
+        ):
+            raise DomainCommandError(
+                f"wall intersects {existing.id} without a shared endpoint; "
+                "split the intersected wall first"
+            )
+
+    incident_ids = {
+        *start_node.connected_wall_ids,
+        *end_node.connected_wall_ids,
+    }
+    wall_id = f"wall_manual_{uuid.uuid4().hex}"
+    wall = Wall(
+        id=wall_id,
+        start_node_id=start_node.id,
+        end_node_id=end_node.id,
+        start=snapped_start,
+        end=snapped_end,
+        polygon=wall_polygon(snapped_start, snapped_end, thickness_px),
+        thickness_px=float(thickness_px),
+        wall_type=wall_type.strip(),
+        orientation=wall_orientation(snapped_start, snapped_end),
+        connected_wall_ids=[],
+        opening_ids=[],
+        length_px=length_px,
+        length=(
+            length_px / updated.scale.pixels_per_unit
+            if updated.scale.pixels_per_unit else None
+        ),
+        metadata=_manual_created_metadata("add_wall"),
+    )
+    updated.walls.append(wall)
+    changed_ids: set[str] = {wall_id, start_node.id, end_node.id, *incident_ids}
+    if not start_created:
+        _mark_manual(start_node.metadata)
+    if not end_created:
+        _mark_manual(end_node.metadata)
+    for existing in updated.walls:
+        if existing.id in incident_ids:
+            _mark_manual(existing.metadata)
+    _rebuild_wall_connectivity(updated)
+    affected_room_ids: list[str] = []
+    for room in updated.rooms:
+        if _wall_affects_room(wall, room.polygon):
+            _invalidate_room_topology(room, wall_id)
+            affected_room_ids.append(room.id)
+            changed_ids.add(room.id)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "add_wall", actor, before, list(changed_ids),
+        {
+            "wall_id": wall_id,
+            "start_node_id": start_node.id,
+            "end_node_id": end_node.id,
+            "start_node_created": start_created,
+            "end_node_created": end_created,
+            "snap_tolerance_px": tolerance,
+            "affected_room_ids": sorted(affected_room_ids),
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def delete_wall(
+    model: TakeoffModel,
+    *,
+    wall_id: str,
+    cascade: bool = False,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Delete a wall, requiring explicit cascade for logical dependents."""
+    _ensure_editable(model)
+    selected = _wall_by_id(model, wall_id)
+    opening_ids = {
+        opening.id for opening in model.openings if opening.wall_id == wall_id
+    } | set(selected.opening_ids)
+    door_ids = {
+        door.id for door in model.doors if door.opening_id in opening_ids
+    }
+    window_ids = {
+        window.id for window in model.windows if window.opening_id in opening_ids
+    }
+    boundary_room_ids = {
+        room.id for room in model.rooms if wall_id in room.boundary_wall_ids
+    }
+    dependents = sorted(opening_ids | door_ids | window_ids | boundary_room_ids)
+    if dependents and not cascade:
+        raise DomainCommandError(
+            "wall has dependent objects: " + ", ".join(dependents)
+            + "; retry with cascade=true"
+        )
+
+    updated = _prepare_edit(model)
+    selected = _wall_by_id(updated, wall_id)
+    endpoint_ids = {selected.start_node_id, selected.end_node_id}
+    adjacent_ids = {
+        wall.id for wall in updated.walls
+        if wall.id != wall_id
+        and endpoint_ids.intersection({wall.start_node_id, wall.end_node_id})
+    }
+    changed_ids: set[str] = {
+        wall_id, *endpoint_ids, *adjacent_ids,
+        *opening_ids, *door_ids, *window_ids,
+    }
+    if cascade:
+        updated.openings = [
+            opening for opening in updated.openings if opening.id not in opening_ids
+        ]
+        updated.doors = [door for door in updated.doors if door.id not in door_ids]
+        updated.windows = [
+            window for window in updated.windows if window.id not in window_ids
+        ]
+    updated.walls = [wall for wall in updated.walls if wall.id != wall_id]
+
+    for adjacent in updated.walls:
+        if adjacent.id in adjacent_ids:
+            _mark_manual(adjacent.metadata)
+    for room in updated.rooms:
+        formally_affected = wall_id in room.boundary_wall_ids
+        spatially_affected = _wall_affects_room(selected, room.polygon)
+        if not formally_affected and not spatially_affected:
+            continue
+        room.boundary_wall_ids = [
+            item for item in room.boundary_wall_ids if item != wall_id
+        ]
+        if cascade:
+            room.door_ids = [item for item in room.door_ids if item not in door_ids]
+            room.window_ids = [
+                item for item in room.window_ids if item not in window_ids
+            ]
+        if not _resolve_room_wall_invalidation(room, wall_id):
+            _invalidate_room_topology(room, wall_id)
+        changed_ids.add(room.id)
+
+    _rebuild_wall_connectivity(updated)
+    orphan_node_ids = {
+        node.id for node in updated.nodes if not node.connected_wall_ids
+    }
+    changed_ids.update(orphan_node_ids)
+    updated.nodes = [
+        node for node in updated.nodes if node.id not in orphan_node_ids
+    ]
+    for node in updated.nodes:
+        if node.id in endpoint_ids:
+            _mark_manual(node.metadata)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "delete_wall", actor, before, list(changed_ids),
+        {
+            "wall_id": wall_id,
+            "cascade": cascade,
+            "deleted_opening_ids": sorted(opening_ids),
+            "deleted_door_ids": sorted(door_ids),
+            "deleted_window_ids": sorted(window_ids),
+            "orphan_node_ids": sorted(orphan_node_ids),
         },
     ))
     updated.validation_issues = validate_model(updated)

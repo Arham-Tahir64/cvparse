@@ -27,6 +27,8 @@ from vision.adapters.domain_annotation_adapter import (
 )
 from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
+    add_wall,
+    delete_wall,
     DomainCommandError,
     move_wall_endpoint,
     redo_last_edit,
@@ -445,6 +447,139 @@ def test_move_wall_endpoint_rejects_geometry_that_orphans_opening():
     else:
         raise AssertionError("invalid shortening was accepted")
     assert wall.end == Coordinate(220, 20)
+
+
+def test_add_wall_snaps_nodes_updates_graph_quantities_and_invalidates_room():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    reused_node = next(node for node in model.nodes if node.point == Coordinate(20, 20))
+    incident_wall = next(
+        wall for wall in model.walls if reused_node.id in {
+            wall.start_node_id, wall.end_node_id,
+        }
+    )
+    before_quantities = calculate_quantities(model)
+
+    updated = add_wall(
+        model,
+        start=Coordinate(21, 21),
+        end=Coordinate(20, 220),
+        thickness_px=12,
+        wall_type="interior",
+        actor="wall-editor",
+    )
+
+    event = updated.edit_history[-1]
+    added = next(wall for wall in updated.walls if wall.id == event.payload["wall_id"])
+    updated_incident = next(wall for wall in updated.walls if wall.id == incident_wall.id)
+    assert event.action == "add_wall"
+    assert updated.revision == model.revision + 1
+    assert added.start == Coordinate(20, 20)
+    assert added.start_node_id == reused_node.id
+    assert added.length_px == 200
+    assert added.length == 10
+    assert added.wall_type == "interior"
+    assert added.metadata.source.kind == ObjectSourceKind.MANUAL_CREATED
+    assert incident_wall.id in added.connected_wall_ids
+    assert added.id in updated_incident.connected_wall_ids
+    assert updated_incident.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert len(updated.nodes) == len(model.nodes) + 1
+    assert calculate_quantities(updated).pixel_measurements[
+        "wall_centerline_length_px"
+    ] == before_quantities.pixel_measurements["wall_centerline_length_px"] + 200
+    assert updated.rooms[0].metadata.review_status == ReviewStatus.NEEDS_REVIEW
+    assert any(
+        issue.code == "room.topology_stale" for issue in updated.validation_issues
+    )
+
+    undone = undo_last_edit(updated, model)
+    assert not any(wall.id == added.id for wall in undone.walls)
+    assert undone.rooms[0].metadata.source.kind == ObjectSourceKind.AUTOMATIC_INFERRED
+    assert not any(
+        issue.code == "room.topology_stale" for issue in undone.validation_issues
+    )
+
+
+def test_add_wall_rejects_duplicate_and_unsplit_crossing():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+
+    for start, end, expected in (
+        (Coordinate(21, 20), Coordinate(219, 20), "duplicates existing wall"),
+        (Coordinate(120, 0), Coordinate(120, 80), "without a shared endpoint"),
+        (Coordinate(120, 20), Coordinate(120, 100), "without a shared endpoint"),
+        (Coordinate(20, 20), Coordinate(100, 20), "without a shared endpoint"),
+    ):
+        try:
+            add_wall(model, start=start, end=end, thickness_px=12)
+        except DomainCommandError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("invalid wall creation was accepted")
+    assert model.revision == 1
+    assert model.undo_revision_stack == []
+
+
+def test_delete_manual_wall_repairs_graph_and_is_undoable():
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    added = add_wall(
+        original,
+        start=Coordinate(20, 20),
+        end=Coordinate(20, 220),
+        thickness_px=12,
+    )
+    added_id = added.edit_history[-1].payload["wall_id"]
+    added_wall = next(wall for wall in added.walls if wall.id == added_id)
+    new_node_id = added_wall.end_node_id
+
+    deleted = delete_wall(added, wall_id=added_id, actor="wall-editor")
+
+    assert deleted.edit_history[-1].action == "delete_wall"
+    assert not any(wall.id == added_id for wall in deleted.walls)
+    assert not any(node.id == new_node_id for node in deleted.nodes)
+    assert all(
+        added_id not in wall.connected_wall_ids for wall in deleted.walls
+    )
+    assert not any(
+        issue.code == "room.topology_stale" for issue in deleted.validation_issues
+    )
+    assert calculate_quantities(deleted).counts["walls"] == len(original.walls)
+
+    restored = undo_last_edit(deleted, added)
+    assert any(wall.id == added_id for wall in restored.walls)
+    assert restored.edit_history[-1].action == "undo"
+
+
+def test_delete_wall_requires_explicit_cascade_for_opening_dependencies():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall = model.walls[0]
+    opening_ids = set(wall.opening_ids)
+    door_ids = {
+        door.id for door in model.doors if door.opening_id in opening_ids
+    }
+
+    try:
+        delete_wall(model, wall_id=wall.id)
+    except DomainCommandError as exc:
+        assert "dependent objects" in str(exc)
+        assert "cascade=true" in str(exc)
+    else:
+        raise AssertionError("dependent wall deletion did not require cascade")
+    assert any(item.id == wall.id for item in model.walls)
+
+    deleted = delete_wall(model, wall_id=wall.id, cascade=True)
+
+    assert not any(item.id == wall.id for item in deleted.walls)
+    assert not opening_ids.intersection(item.id for item in deleted.openings)
+    assert not door_ids.intersection(item.id for item in deleted.doors)
+    assert all(
+        wall.id not in item.connected_wall_ids for item in deleted.walls
+    )
+    assert any(
+        issue.code == "room.topology_stale" for issue in deleted.validation_issues
+    )
+    assert deleted.edit_history[-1].payload["cascade"] is True
 
 
 def test_validation_flags_wall_endpoint_that_disagrees_with_shared_node():

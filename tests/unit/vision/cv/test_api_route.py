@@ -308,6 +308,65 @@ def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     reviewed_pdf.close()
 
 
+def test_persisted_wall_create_delete_quantities_and_undo(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    initial_length = sum(wall["length_px"] for wall in created["walls"])
+
+    create_response = client.post(
+        f"/api/takeoff/models/{model_id}/walls",
+        json={
+            "expected_revision": 1,
+            "start_x": 10,
+            "start_y": 10,
+            "end_x": 100,
+            "end_y": 10,
+            "thickness_px": 8,
+            "wall_type": "interior",
+            "snap_tolerance_px": 0,
+            "actor": "wall-editor",
+        },
+    )
+    assert create_response.status_code == 200
+    added = create_response.json()["model"]
+    wall_id = added["edit_history"][-1]["payload"]["wall_id"]
+    wall = next(item for item in added["walls"] if item["id"] == wall_id)
+    assert added["revision"] == 2
+    assert wall["metadata"]["source"]["kind"] == "manual_created"
+    assert wall["length_px"] == 90
+    quantities = client.get(
+        f"/api/takeoff/models/{model_id}/quantities"
+    ).json()["quantities"]
+    assert quantities["model_revision"] == 2
+    assert quantities["pixel_measurements"]["wall_centerline_length_px"] == pytest.approx(
+        initial_length + 90
+    )
+
+    delete_response = client.request(
+        "DELETE",
+        f"/api/takeoff/models/{model_id}/walls/{wall_id}",
+        json={"expected_revision": 2, "actor": "wall-editor"},
+    )
+    assert delete_response.status_code == 200
+    deleted = delete_response.json()["model"]
+    assert deleted["revision"] == 3
+    assert not any(item["id"] == wall_id for item in deleted["walls"])
+    assert deleted["edit_history"][-1]["action"] == "delete_wall"
+
+    restored_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 3, "actor": "wall-editor"},
+    )
+    assert restored_response.status_code == 200
+    restored = restored_response.json()["model"]
+    assert restored["revision"] == 4
+    assert any(item["id"] == wall_id for item in restored["walls"])
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

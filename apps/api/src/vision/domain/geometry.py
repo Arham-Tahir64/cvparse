@@ -62,6 +62,93 @@ def transform_wall_local_point(
     )
 
 
+def _cross(first: Coordinate, second: Coordinate, point: Coordinate) -> float:
+    return (
+        (second.x - first.x) * (point.y - first.y)
+        - (second.y - first.y) * (point.x - first.x)
+    )
+
+
+def point_on_segment(
+    point: Coordinate,
+    start: Coordinate,
+    end: Coordinate,
+    tolerance: float = 1e-6,
+) -> bool:
+    """Return whether a point lies on a finite segment within pixel tolerance."""
+    scale = max(1.0, distance(start, end))
+    if abs(_cross(start, end, point)) > tolerance * scale:
+        return False
+    return (
+        min(start.x, end.x) - tolerance <= point.x <= max(start.x, end.x) + tolerance
+        and min(start.y, end.y) - tolerance <= point.y <= max(start.y, end.y) + tolerance
+    )
+
+
+def segments_intersect(
+    first_start: Coordinate,
+    first_end: Coordinate,
+    second_start: Coordinate,
+    second_end: Coordinate,
+) -> bool:
+    """Detect crossings or overlaps, excluding an already shared endpoint."""
+    first_side = _cross(first_start, first_end, second_start)
+    second_side = _cross(first_start, first_end, second_end)
+    third_side = _cross(second_start, second_end, first_start)
+    fourth_side = _cross(second_start, second_end, first_end)
+    if (
+        (first_side > 0 > second_side or first_side < 0 < second_side)
+        and (third_side > 0 > fourth_side or third_side < 0 < fourth_side)
+    ):
+        return True
+    contacts = [
+        point
+        for point, start, end in (
+            (second_start, first_start, first_end),
+            (second_end, first_start, first_end),
+            (first_start, second_start, second_end),
+            (first_end, second_start, second_end),
+        )
+        if point_on_segment(point, start, end)
+    ]
+    unique_contacts: list[Coordinate] = []
+    for contact in contacts:
+        if not any(distance(contact, existing) <= 1e-6 for existing in unique_contacts):
+            unique_contacts.append(contact)
+    if len(unique_contacts) > 1:
+        return True
+    if not unique_contacts:
+        return False
+    contact = unique_contacts[0]
+    shared_endpoints = [
+        first
+        for first in (first_start, first_end)
+        for second in (second_start, second_end)
+        if distance(first, second) <= 1e-6
+    ]
+    return not any(distance(contact, shared) <= 1e-6 for shared in shared_endpoints)
+
+
+def point_in_polygon(point: Coordinate, polygon: list[Coordinate]) -> bool:
+    """Return whether a point is inside or on the boundary of a polygon."""
+    if len(polygon) < 3:
+        return False
+    edges = list(zip(polygon, polygon[1:] + polygon[:1]))
+    if any(point_on_segment(point, start, end) for start, end in edges):
+        return True
+    inside = False
+    for start, end in edges:
+        if (start.y > point.y) == (end.y > point.y):
+            continue
+        crossing_x = (
+            start.x
+            + (point.y - start.y) * (end.x - start.x) / (end.y - start.y)
+        )
+        if point.x < crossing_x:
+            inside = not inside
+    return inside
+
+
 def polygon_area(polygon: list[Coordinate]) -> float:
     if len(polygon) < 3:
         return 0.0
