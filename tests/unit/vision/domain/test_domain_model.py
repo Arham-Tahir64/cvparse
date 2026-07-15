@@ -5,6 +5,9 @@ import copy
 import json
 import xml.etree.ElementTree as ET
 
+import fitz
+
+from vision.adapters.domain_pdf import render_reviewed_pdf
 from vision.cv import serialize as legacy_serialize
 from vision.cv.models import (
     CVTakeoffResult,
@@ -34,6 +37,10 @@ from vision.domain.models import Coordinate, ObjectSourceKind, OpeningKind, Revi
 from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.serialize import from_json_dict, to_json_dict
+from vision.domain.source_assets import (
+    FileSourceAssetRepository,
+    SourceAssetIntegrityError,
+)
 from vision.domain.validation import validate_model
 
 
@@ -428,6 +435,56 @@ def test_verified_quantities_exclude_door_without_confirmed_opening():
     assert door.id in summary.excluded_object_ids
     assert summary.complete is False
     assert any("dependencies" in warning for warning in summary.warnings)
+
+
+def test_file_source_repository_is_idempotent_atomic_and_detects_tampering(tmp_path):
+    content = b"original floorplan bytes"
+    import hashlib
+
+    fingerprint = hashlib.sha256(content).hexdigest()
+    repository = FileSourceAssetRepository(tmp_path)
+
+    repository.save(fingerprint, content)
+    repository.save(fingerprint, content)
+
+    assert repository.get(fingerprint) == content
+    assert len(list(tmp_path.glob("*.bin"))) == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    stored = next(tmp_path.glob("*.bin"))
+    stored.write_bytes(b"tampered")
+    try:
+        repository.get(fingerprint)
+    except SourceAssetIntegrityError:
+        pass
+    else:
+        raise AssertionError("tampered source asset was accepted")
+
+
+def test_reviewed_pdf_preserves_source_and_renders_current_model_revision():
+    source = fitz.open()
+    page = source.new_page(width=180, height=144)
+    page.insert_text((10, 15), "ORIGINAL SOURCE")
+    source_bytes = source.tobytes()
+    source.close()
+
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    shared = next(node for node in model.nodes if len(node.connected_wall_ids) == 2)
+    wall = next(item for item in model.walls if item.end_node_id == shared.id)
+    updated = move_wall_endpoint(
+        model, wall_id=wall.id, endpoint="end", point=Coordinate(240, 40),
+    )
+
+    output = render_reviewed_pdf(source_bytes, "application/pdf", updated)
+    reviewed = fitz.open(stream=output, filetype="pdf")
+
+    assert reviewed.page_count == 1
+    assert "ORIGINAL SOURCE" in reviewed[0].get_text()
+    assert reviewed.metadata["subject"] == f"Model {updated.id} revision {updated.revision}"
+    drawings = reviewed[0].get_drawings()
+    assert len(drawings) >= len(updated.walls) + len(updated.rooms)
+    assert max(drawing["rect"].x1 for drawing in drawings) >= 240 * 72 / 200
+    reviewed.close()
 
 
 def test_legacy_schema_remains_unchanged():

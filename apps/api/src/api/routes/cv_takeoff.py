@@ -6,7 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from api.model_store import get_model_repository
+from api.model_store import get_model_repository, get_source_asset_repository
 from vision.adapters.annotation_adapter import to_annotation_document
 from vision.cv import serialize
 from vision.cv.config import PipelineConfig
@@ -16,6 +16,7 @@ from vision.cv.preprocessing import load_image
 from vision.domain.import_cv import import_cv_result
 from vision.domain.repository import ModelRepository, RevisionConflictError
 from vision.domain.serialize import to_json_dict as domain_to_json_dict
+from vision.domain.source_assets import SourceAssetRepository
 
 logger = logging.getLogger("flowbuildr.api.cv_takeoff")
 
@@ -31,6 +32,7 @@ async def cv_takeoff(
     include_model: bool = Form(False),
     persist_model: bool = Form(False),
     repository: ModelRepository = Depends(get_model_repository),
+    source_repository: SourceAssetRepository = Depends(get_source_asset_repository),
 ):
     mime = mime_type or file.content_type or "application/octet-stream"
     file_bytes = await file.read()
@@ -56,6 +58,7 @@ async def cv_takeoff(
         )
         if persist_model:
             try:
+                source_repository.save(fingerprint, file_bytes)
                 repository.save(model)
             except RevisionConflictError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc

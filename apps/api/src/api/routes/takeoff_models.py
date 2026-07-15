@@ -4,11 +4,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from api.model_store import get_model_repository
+from api.model_store import get_model_repository, get_source_asset_repository
 from vision.adapters.domain_annotation_adapter import (
     to_model_annotation_document,
     to_model_svg,
 )
+from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
@@ -23,6 +24,11 @@ from vision.domain.repository import (
     RevisionConflictError,
 )
 from vision.domain.serialize import to_json_dict
+from vision.domain.source_assets import (
+    SourceAssetIntegrityError,
+    SourceAssetNotFoundError,
+    SourceAssetRepository,
+)
 
 
 router = APIRouter(prefix="/api/takeoff/models", tags=["takeoff-models"])
@@ -110,6 +116,37 @@ def get_model_quantities(
 ):
     model = _get(repository, model_id)
     return {"quantities": calculate_quantities(model, basis).to_dict()}
+
+
+@router.get("/{model_id}/reviewed.pdf")
+def get_reviewed_pdf(
+    model_id: str,
+    repository: ModelRepository = Depends(get_model_repository),
+    source_repository: SourceAssetRepository = Depends(get_source_asset_repository),
+):
+    model = _get(repository, model_id)
+    try:
+        source_content = source_repository.get(model.source.fingerprint)
+    except SourceAssetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SourceAssetIntegrityError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="persisted source asset failed integrity validation",
+        ) from exc
+    try:
+        content = render_reviewed_pdf(
+            source_content, model.source.mime_type, model,
+        )
+    except DomainRenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=content, media_type="application/pdf",
+        headers={
+            "ETag": f'"{model.id}:{model.revision}:pdf"',
+            "Content-Disposition": f'inline; filename="{model.id}-r{model.revision}.pdf"',
+        },
+    )
 
 
 @router.put("/{model_id}/scale")

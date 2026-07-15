@@ -1,14 +1,16 @@
 """Smoke test for POST /api/cv/takeoff."""
 import cv2
+import fitz
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from api.model_store import get_model_repository
+from api.model_store import get_model_repository, get_source_asset_repository
 from vision.cv import ocr_engines
 from vision.cv.models import TextElement
 from vision.domain.repository import InMemoryModelRepository
+from vision.domain.source_assets import InMemorySourceAssetRepository
 
 
 class FakeEngine:
@@ -20,7 +22,9 @@ class FakeEngine:
 def client(monkeypatch):
     monkeypatch.setattr(ocr_engines, "get_engine", lambda *_: FakeEngine())
     repository = InMemoryModelRepository()
+    source_repository = InMemorySourceAssetRepository()
     app.dependency_overrides[get_model_repository] = lambda: repository
+    app.dependency_overrides[get_source_asset_repository] = lambda: source_repository
     try:
         yield TestClient(app)
     finally:
@@ -202,6 +206,20 @@ def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     assert quantities["pixel_measurements"]["wall_centerline_length_px"] != pytest.approx(
         sum(item["length_px"] for item in created["walls"])
     )
+
+    reviewed_pdf_response = client.get(
+        f"/api/takeoff/models/{created['id']}/reviewed.pdf"
+    )
+    assert reviewed_pdf_response.status_code == 200
+    assert reviewed_pdf_response.headers["content-type"] == "application/pdf"
+    assert reviewed_pdf_response.headers["etag"] == f'"{created["id"]}:2:pdf"'
+    reviewed_pdf = fitz.open(
+        stream=reviewed_pdf_response.content, filetype="pdf",
+    )
+    assert reviewed_pdf.page_count == 1
+    assert reviewed_pdf.metadata["subject"] == f"Model {created['id']} revision 2"
+    assert reviewed_pdf[0].get_drawings()
+    reviewed_pdf.close()
 
 
 def test_takeoff_route_unsupported_mime(client):
