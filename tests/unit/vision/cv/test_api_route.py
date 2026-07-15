@@ -516,6 +516,99 @@ def test_persisted_opening_create_move_quantities_annotations_and_undo(client):
     assert restored["width_px"] == 20
 
 
+def test_persisted_opening_reclassify_delete_and_undo(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    wall_model = client.post(
+        f"/api/takeoff/models/{model_id}/walls",
+        json={
+            "expected_revision": 1,
+            "start_x": 10,
+            "start_y": 10,
+            "end_x": 100,
+            "end_y": 10,
+            "thickness_px": 8,
+            "snap_tolerance_px": 0,
+        },
+    ).json()["model"]
+    wall_id = wall_model["edit_history"][-1]["payload"]["wall_id"]
+    opened = client.post(
+        f"/api/takeoff/models/{model_id}/walls/{wall_id}/openings",
+        json={
+            "expected_revision": 2,
+            "x": 50,
+            "y": 10,
+            "width_px": 20,
+            "kind": "door",
+        },
+    ).json()["model"]
+    opening_id = opened["edit_history"][-1]["payload"]["opening_id"]
+    door_id = opened["edit_history"][-1]["payload"]["logical_object_id"]
+
+    kind_response = client.put(
+        f"/api/takeoff/models/{model_id}/openings/{opening_id}/kind",
+        json={
+            "expected_revision": 3,
+            "kind": "window",
+            "actor": "opening-editor",
+        },
+    )
+    assert kind_response.status_code == 200
+    converted = kind_response.json()["model"]
+    event = converted["edit_history"][-1]
+    window_id = event["payload"]["new_logical_object_id"]
+    converted_opening = next(
+        item for item in converted["openings"] if item["id"] == opening_id
+    )
+    assert converted["revision"] == 4
+    assert converted_opening["kind"] == "window"
+    assert not any(item["id"] == door_id for item in converted["doors"])
+    assert any(item["id"] == window_id for item in converted["windows"])
+
+    guarded = client.request(
+        "DELETE",
+        f"/api/takeoff/models/{model_id}/openings/{opening_id}",
+        json={"expected_revision": 4},
+    )
+    assert guarded.status_code == 422
+    assert "cascade=true" in guarded.json()["detail"]
+    deleted_response = client.request(
+        "DELETE",
+        f"/api/takeoff/models/{model_id}/openings/{opening_id}",
+        json={
+            "expected_revision": 4,
+            "cascade": True,
+            "actor": "opening-editor",
+        },
+    )
+    assert deleted_response.status_code == 200
+    deleted = deleted_response.json()["model"]
+    assert deleted["revision"] == 5
+    assert not any(item["id"] == opening_id for item in deleted["openings"])
+    assert not any(item["id"] == window_id for item in deleted["windows"])
+    quantities = client.get(
+        f"/api/takeoff/models/{model_id}/quantities"
+    ).json()["quantities"]
+    assert opening_id not in quantities["included_object_ids"]
+    annotations = client.get(
+        f"/api/takeoff/models/{model_id}/annotations"
+    ).json()["annotations"]
+    assert not any(item["id"] == window_id for item in annotations["elements"])
+
+    undo_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 5},
+    )
+    assert undo_response.status_code == 200
+    restored = undo_response.json()["model"]
+    assert any(item["id"] == opening_id for item in restored["openings"])
+    assert any(item["id"] == window_id for item in restored["windows"])
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

@@ -29,11 +29,13 @@ from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
     add_opening,
     add_wall,
+    delete_opening,
     delete_wall,
     DomainCommandError,
     move_wall_endpoint,
     redo_last_edit,
     set_approval_status,
+    set_opening_kind,
     set_review_status,
     set_scale,
     split_wall,
@@ -793,6 +795,134 @@ def test_update_opening_geometry_rejects_noop_and_other_opening_overlap():
             assert expected in str(exc)
         else:
             raise AssertionError("invalid opening geometry update was accepted")
+
+
+def test_opening_reclassification_preserves_physical_id_and_migrates_relations():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    opening = next(item for item in model.openings if item.kind == OpeningKind.DOOR)
+    door = next(item for item in model.doors if item.opening_id == opening.id)
+    room = model.rooms[0]
+    room.boundary_wall_ids = [opening.wall_id]
+    room.door_ids = [door.id]
+    before = calculate_quantities(model)
+
+    updated = set_opening_kind(
+        model,
+        opening_id=opening.id,
+        kind=OpeningKind.WINDOW,
+        actor="opening-editor",
+    )
+
+    converted = next(item for item in updated.openings if item.id == opening.id)
+    new_window = next(item for item in updated.windows if item.opening_id == opening.id)
+    after = calculate_quantities(updated)
+    event = updated.edit_history[-1]
+    assert event.action == "set_opening_kind"
+    assert converted.id == opening.id
+    assert converted.kind == OpeningKind.WINDOW
+    assert converted.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert not any(item.id == door.id for item in updated.doors)
+    assert new_window.metadata.source.kind == ObjectSourceKind.MANUAL_CREATED
+    assert door.id not in updated.rooms[0].door_ids
+    assert new_window.id in updated.rooms[0].window_ids
+    assert updated.rooms[0].metadata.review_status == ReviewStatus.NEEDS_REVIEW
+    assert after.counts["openings"] == before.counts["openings"]
+    assert after.counts["doors"] == before.counts["doors"] - 1
+    assert after.counts["windows"] == before.counts["windows"] + 1
+    assert after.pixel_measurements["opening_width_px"] == (
+        before.pixel_measurements["opening_width_px"]
+    )
+    annotations = to_model_annotation_document(updated)
+    assert any(item["id"] == new_window.id for item in annotations["elements"])
+    assert not any(item["id"] == door.id for item in annotations["elements"])
+
+    undone = undo_last_edit(updated, model)
+    assert any(item.id == door.id for item in undone.doors)
+    assert not any(item.id == new_window.id for item in undone.windows)
+    restored = next(item for item in undone.openings if item.id == opening.id)
+    assert restored.kind == OpeningKind.DOOR
+    redone = redo_last_edit(undone, updated)
+    assert any(item.id == new_window.id for item in redone.windows)
+
+
+def test_opening_reclassification_rejects_noop_without_mutation():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    opening = model.openings[0]
+
+    try:
+        set_opening_kind(model, opening_id=opening.id, kind=opening.kind)
+    except DomainCommandError as exc:
+        assert "already classified" in str(exc)
+    else:
+        raise AssertionError("no-op opening classification was accepted")
+    assert model.revision == 1
+    assert model.undo_revision_stack == []
+
+
+def test_delete_opening_requires_cascade_and_restores_dependency_chain_on_undo():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    opening = next(item for item in model.openings if item.kind == OpeningKind.DOOR)
+    door = next(item for item in model.doors if item.opening_id == opening.id)
+    wall = next(item for item in model.walls if item.id == opening.wall_id)
+    model.rooms[0].boundary_wall_ids = [wall.id]
+    model.rooms[0].door_ids = [door.id]
+    before = calculate_quantities(model)
+
+    try:
+        delete_opening(model, opening_id=opening.id)
+    except DomainCommandError as exc:
+        assert "dependent objects" in str(exc)
+        assert "cascade=true" in str(exc)
+    else:
+        raise AssertionError("opening dependency deletion did not require cascade")
+
+    deleted = delete_opening(
+        model, opening_id=opening.id, cascade=True, actor="opening-editor",
+    )
+
+    after = calculate_quantities(deleted)
+    deleted_wall = next(item for item in deleted.walls if item.id == wall.id)
+    assert not any(item.id == opening.id for item in deleted.openings)
+    assert not any(item.id == door.id for item in deleted.doors)
+    assert opening.id not in deleted_wall.opening_ids
+    assert door.id not in deleted.rooms[0].door_ids
+    assert after.counts["openings"] == before.counts["openings"] - 1
+    assert after.counts["doors"] == before.counts["doors"] - 1
+    assert after.pixel_measurements["opening_width_px"] == (
+        before.pixel_measurements["opening_width_px"] - opening.width_px
+    )
+    assert deleted.edit_history[-1].action == "delete_opening"
+    assert deleted.edit_history[-1].payload["cascade"] is True
+
+    restored = undo_last_edit(deleted, model)
+    assert any(item.id == opening.id for item in restored.openings)
+    assert any(item.id == door.id for item in restored.doors)
+    assert opening.id in next(
+        item for item in restored.walls if item.id == wall.id
+    ).opening_ids
+
+
+def test_delete_unclassified_opening_needs_no_cascade():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    added = add_opening(
+        model,
+        wall_id=model.walls[0].id,
+        center=Coordinate(180, 20),
+        width_px=20,
+        kind=OpeningKind.UNKNOWN,
+    )
+    opening_id = added.edit_history[-1].payload["opening_id"]
+
+    deleted = delete_opening(added, opening_id=opening_id)
+
+    assert not any(item.id == opening_id for item in deleted.openings)
+    assert deleted.edit_history[-1].payload["cascade"] is False
 
 
 def test_delete_manual_wall_repairs_graph_and_is_undoable():

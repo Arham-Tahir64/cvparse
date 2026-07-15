@@ -1068,6 +1068,177 @@ def update_opening_geometry(
     return updated
 
 
+def set_opening_kind(
+    model: TakeoffModel,
+    *,
+    opening_id: str,
+    kind: OpeningKind,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Reclassify one physical opening while preserving its stable ID."""
+    _ensure_editable(model)
+    selected = _opening_by_id(model, opening_id)
+    if selected.kind == kind:
+        raise DomainCommandError(f"opening is already classified as {kind.value}")
+
+    updated = _prepare_edit(model)
+    opening = _opening_by_id(updated, opening_id)
+    wall = _wall_by_id(updated, opening.wall_id)
+    removed_door_ids = {
+        door.id for door in updated.doors if door.opening_id == opening_id
+    }
+    removed_window_ids = {
+        window.id for window in updated.windows if window.opening_id == opening_id
+    }
+    updated.doors = [
+        door for door in updated.doors if door.id not in removed_door_ids
+    ]
+    updated.windows = [
+        window for window in updated.windows if window.id not in removed_window_ids
+    ]
+    previous_kind = opening.kind
+    opening.kind = kind
+    _mark_manual(opening.metadata)
+    _mark_manual(wall.metadata)
+    logical_id: str | None = None
+    if kind == OpeningKind.DOOR:
+        door = Door(
+            id=f"door_manual_{uuid.uuid4().hex}",
+            opening_id=opening_id,
+            subtype="unknown",
+            swing_direction=None,
+            hinge_side=None,
+            hinge=None,
+            swing_end=None,
+            swing_arc=[],
+            metadata=_manual_created_metadata("set_opening_kind"),
+        )
+        updated.doors.append(door)
+        logical_id = door.id
+    elif kind == OpeningKind.WINDOW:
+        window = Window(
+            id=f"window_manual_{uuid.uuid4().hex}",
+            opening_id=opening_id,
+            subtype="unknown",
+            sill_height=None,
+            metadata=_manual_created_metadata("set_opening_kind"),
+        )
+        updated.windows.append(window)
+        logical_id = window.id
+
+    changed_ids: set[str] = {
+        opening_id, wall.id, *removed_door_ids, *removed_window_ids,
+    }
+    if logical_id is not None:
+        changed_ids.add(logical_id)
+    old_logical_ids = removed_door_ids | removed_window_ids
+    for room in updated.rooms:
+        had_relationship = bool(
+            old_logical_ids.intersection(room.door_ids)
+            or old_logical_ids.intersection(room.window_ids)
+        )
+        room.door_ids = [
+            item for item in room.door_ids if item not in old_logical_ids
+        ]
+        room.window_ids = [
+            item for item in room.window_ids if item not in old_logical_ids
+        ]
+        if logical_id is not None and (
+            had_relationship or wall.id in room.boundary_wall_ids
+        ):
+            target = room.door_ids if kind == OpeningKind.DOOR else room.window_ids
+            target.append(logical_id)
+            target[:] = sorted(set(target))
+        if had_relationship or wall.id in room.boundary_wall_ids:
+            _mark_manual(room.metadata)
+            changed_ids.add(room.id)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "set_opening_kind", actor, before, list(changed_ids),
+        {
+            "opening_id": opening_id,
+            "wall_id": wall.id,
+            "before": previous_kind.value,
+            "after": kind.value,
+            "removed_door_ids": sorted(removed_door_ids),
+            "removed_window_ids": sorted(removed_window_ids),
+            "new_logical_object_id": logical_id,
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def delete_opening(
+    model: TakeoffModel,
+    *,
+    opening_id: str,
+    cascade: bool = False,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Delete one physical opening with explicit logical dependency consent."""
+    _ensure_editable(model)
+    selected = _opening_by_id(model, opening_id)
+    door_ids = {
+        door.id for door in model.doors if door.opening_id == opening_id
+    }
+    window_ids = {
+        window.id for window in model.windows if window.opening_id == opening_id
+    }
+    dependents = sorted(door_ids | window_ids)
+    if dependents and not cascade:
+        raise DomainCommandError(
+            "opening has dependent objects: " + ", ".join(dependents)
+            + "; retry with cascade=true"
+        )
+
+    updated = _prepare_edit(model)
+    opening = _opening_by_id(updated, opening_id)
+    wall = _wall_by_id(updated, opening.wall_id)
+    if cascade:
+        updated.doors = [door for door in updated.doors if door.id not in door_ids]
+        updated.windows = [
+            window for window in updated.windows if window.id not in window_ids
+        ]
+    updated.openings = [
+        item for item in updated.openings if item.id != opening_id
+    ]
+    wall.opening_ids = [item for item in wall.opening_ids if item != opening_id]
+    _mark_manual(wall.metadata)
+    changed_ids: set[str] = {opening_id, wall.id, *door_ids, *window_ids}
+    logical_ids = door_ids | window_ids
+    for room in updated.rooms:
+        had_relationship = bool(
+            logical_ids.intersection(room.door_ids)
+            or logical_ids.intersection(room.window_ids)
+        )
+        room.door_ids = [item for item in room.door_ids if item not in logical_ids]
+        room.window_ids = [
+            item for item in room.window_ids if item not in logical_ids
+        ]
+        if had_relationship or wall.id in room.boundary_wall_ids:
+            _mark_manual(room.metadata)
+            changed_ids.add(room.id)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "delete_opening", actor, before, list(changed_ids),
+        {
+            "opening_id": opening_id,
+            "wall_id": wall.id,
+            "kind": opening.kind.value,
+            "cascade": cascade,
+            "deleted_door_ids": sorted(door_ids),
+            "deleted_window_ids": sorted(window_ids),
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
 def delete_wall(
     model: TakeoffModel,
     *,

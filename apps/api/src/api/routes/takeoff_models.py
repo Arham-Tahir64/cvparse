@@ -13,11 +13,13 @@ from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
     add_opening,
     add_wall,
+    delete_opening,
     delete_wall,
     DomainCommandError,
     move_wall_endpoint,
     redo_last_edit,
     set_approval_status,
+    set_opening_kind,
     set_review_status,
     set_scale,
     split_wall,
@@ -111,6 +113,18 @@ class OpeningGeometryUpdate(BaseModel):
     y: float
     width_px: float = Field(gt=0)
     projection_tolerance_px: float | None = Field(default=None, ge=0)
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class OpeningKindUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    kind: OpeningKind
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class OpeningDelete(BaseModel):
+    expected_revision: int = Field(ge=1)
+    cascade: bool = False
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
@@ -457,6 +471,50 @@ def revise_opening_geometry(
             center=Coordinate(request.x, request.y),
             width_px=request.width_px,
             projection_tolerance_px=request.projection_tolerance_px,
+            actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.put("/{model_id}/openings/{opening_id}/kind")
+def revise_opening_kind(
+    model_id: str,
+    opening_id: str,
+    request: OpeningKindUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = set_opening_kind(
+            model,
+            opening_id=opening_id,
+            kind=request.kind,
+            actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.delete("/{model_id}/openings/{opening_id}")
+def remove_opening(
+    model_id: str,
+    opening_id: str,
+    request: OpeningDelete,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = delete_opening(
+            model,
+            opening_id=opening_id,
+            cascade=request.cascade,
             actor=request.actor,
         )
     except DomainCommandError as exc:
