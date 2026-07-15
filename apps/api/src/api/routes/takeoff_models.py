@@ -1,10 +1,14 @@
 """Read and revise persisted editable takeoff models."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from api.model_store import get_model_repository
+from vision.adapters.domain_annotation_adapter import (
+    to_model_annotation_document,
+    to_model_svg,
+)
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
@@ -75,6 +79,26 @@ def get_model(
     repository: ModelRepository = Depends(get_model_repository),
 ):
     return {"model": to_json_dict(_get(repository, model_id))}
+
+
+@router.get("/{model_id}/annotations")
+def get_model_annotations(
+    model_id: str,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    return {"annotations": to_model_annotation_document(_get(repository, model_id))}
+
+
+@router.get("/{model_id}/overlay.svg")
+def get_model_overlay(
+    model_id: str,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    return Response(
+        content=to_model_svg(model), media_type="image/svg+xml",
+        headers={"ETag": f'"{model.id}:{model.revision}"'},
+    )
 
 
 @router.put("/{model_id}/scale")

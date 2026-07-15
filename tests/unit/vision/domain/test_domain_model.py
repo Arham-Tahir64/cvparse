@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import xml.etree.ElementTree as ET
 
 from vision.cv import serialize as legacy_serialize
 from vision.cv.models import (
@@ -16,6 +17,10 @@ from vision.cv.models import (
     Room as CVRoom,
     Wall as CVWall,
     Window as CVWindow,
+)
+from vision.adapters.domain_annotation_adapter import (
+    to_model_annotation_document,
+    to_model_svg,
 )
 from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
@@ -322,6 +327,49 @@ def test_validation_flags_wall_endpoint_that_disagrees_with_shared_node():
 
     mismatch = next(issue for issue in issues if issue.code == "wall.node_geometry_mismatch")
     assert model.walls[0].id in mismatch.affected_object_ids
+
+
+def test_model_annotation_export_uses_current_reviewed_geometry():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    shared = next(node for node in model.nodes if len(node.connected_wall_ids) == 2)
+    wall = next(item for item in model.walls if item.end_node_id == shared.id)
+    moved = move_wall_endpoint(
+        model, wall_id=wall.id, endpoint="end", point=Coordinate(240, 40),
+    )
+    rejected_wall_id = moved.walls[1].id
+    reviewed = set_review_status(
+        moved, object_id=rejected_wall_id, status=ReviewStatus.REJECTED,
+    )
+
+    document = to_model_annotation_document(reviewed)
+    exported_wall = next(
+        item for item in document["elements"] if item["id"] == wall.id
+    )
+
+    assert document["model_revision"] == reviewed.revision
+    assert exported_wall["geometry"]["centerline"]["x2"] == 240
+    assert exported_wall["geometry"]["centerline"]["y2"] == 40
+    assert exported_wall["review_state"] == "needs_review"
+    assert not any(item["id"] == rejected_wall_id for item in document["elements"])
+
+
+def test_model_svg_is_deterministic_and_reflects_manual_revision():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    shared = next(node for node in model.nodes if len(node.connected_wall_ids) == 2)
+    wall = next(item for item in model.walls if item.end_node_id == shared.id)
+    updated = move_wall_endpoint(
+        model, wall_id=wall.id, endpoint="end", point=Coordinate(240, 40),
+    )
+
+    first = to_model_svg(updated)
+    second = to_model_svg(from_json_dict(to_json_dict(updated)))
+
+    ET.fromstring(first)
+    assert first == second
+    assert f'data-model-revision="{updated.revision}"' in first
+    assert f'data-id="{wall.id}"' in first
+    assert "240,40" in first
+    assert 'data-source="manual_adjusted"' in first
 
 
 def test_legacy_schema_remains_unchanged():

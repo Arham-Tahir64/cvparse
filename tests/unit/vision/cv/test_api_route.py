@@ -164,6 +164,29 @@ def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     }
     assert updated["edit_history"][-1]["action"] == "move_wall_endpoint"
 
+    annotations_response = client.get(
+        f"/api/takeoff/models/{created['id']}/annotations"
+    )
+    assert annotations_response.status_code == 200
+    annotations = annotations_response.json()["annotations"]
+    assert annotations["model_revision"] == 2
+    rendered_wall = next(
+        item for item in annotations["elements"] if item["id"] == wall["id"]
+    )
+    coordinate_suffix = "1" if endpoint == "start" else "2"
+    centerline = rendered_wall["geometry"]["centerline"]
+    assert centerline[f"x{coordinate_suffix}"] == shared["point"]["x"] + 2
+    assert centerline[f"y{coordinate_suffix}"] == shared["point"]["y"] + 2
+    assert rendered_wall["review_state"] == "needs_review"
+
+    svg_response = client.get(
+        f"/api/takeoff/models/{created['id']}/overlay.svg"
+    )
+    assert svg_response.status_code == 200
+    assert svg_response.headers["content-type"].startswith("image/svg+xml")
+    assert svg_response.headers["etag"] == f'"{created["id"]}:2"'
+    assert f'data-id="{wall["id"]}"' in svg_response.text
+
 
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
