@@ -187,6 +187,22 @@ def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     assert svg_response.headers["etag"] == f'"{created["id"]}:2"'
     assert f'data-id="{wall["id"]}"' in svg_response.text
 
+    quantities_response = client.get(
+        f"/api/takeoff/models/{created['id']}/quantities?basis=provisional"
+    )
+    assert quantities_response.status_code == 200
+    quantities = quantities_response.json()["quantities"]
+    assert quantities["model_revision"] == 2
+    assert quantities["basis"] == "provisional"
+    assert quantities["authoritative"] is False
+    assert quantities["counts"]["walls"] == len(updated["walls"])
+    assert quantities["pixel_measurements"]["wall_centerline_length_px"] == pytest.approx(
+        sum(item["length_px"] for item in updated["walls"])
+    )
+    assert quantities["pixel_measurements"]["wall_centerline_length_px"] != pytest.approx(
+        sum(item["length_px"] for item in created["walls"])
+    )
+
 
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(

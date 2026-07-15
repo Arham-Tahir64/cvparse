@@ -1,7 +1,7 @@
 """Read and revise persisted editable takeoff models."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from api.model_store import get_model_repository
@@ -16,6 +16,7 @@ from vision.domain.commands import (
     set_scale,
 )
 from vision.domain.models import Coordinate, ReviewStatus
+from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.repository import (
     ModelNotFoundError,
     ModelRepository,
@@ -99,6 +100,16 @@ def get_model_overlay(
         content=to_model_svg(model), media_type="image/svg+xml",
         headers={"ETag": f'"{model.id}:{model.revision}"'},
     )
+
+
+@router.get("/{model_id}/quantities")
+def get_model_quantities(
+    model_id: str,
+    basis: QuantityBasis = Query(default=QuantityBasis.PROVISIONAL),
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    return {"quantities": calculate_quantities(model, basis).to_dict()}
 
 
 @router.put("/{model_id}/scale")

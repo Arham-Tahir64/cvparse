@@ -32,6 +32,7 @@ from vision.domain.commands import (
 from vision.domain.geometry import distance, point_at_offset, polygon_area
 from vision.domain.models import Coordinate, ObjectSourceKind, OpeningKind, ReviewStatus
 from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
+from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.serialize import from_json_dict, to_json_dict
 from vision.domain.validation import validate_model
 
@@ -370,6 +371,63 @@ def test_model_svg_is_deterministic_and_reflects_manual_revision():
     assert f'data-id="{wall.id}"' in first
     assert "240,40" in first
     assert 'data-source="manual_adjusted"' in first
+
+
+def test_provisional_quantities_are_explicitly_unscaled_and_non_authoritative():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+
+    summary = calculate_quantities(model)
+
+    assert summary.basis == QuantityBasis.PROVISIONAL
+    assert summary.counts == {
+        "walls": 2, "openings": 2, "doors": 1, "windows": 1, "rooms": 1,
+    }
+    assert summary.pixel_measurements["wall_centerline_length_px"] == 400
+    assert summary.calibrated_measurements["floor_area"] is None
+    assert summary.authoritative is False
+    assert any("automatic candidates" in warning for warning in summary.warnings)
+
+
+def test_verified_quantities_require_confirmed_dependency_chain_and_scale():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    for collection in (
+        model.walls, model.openings, model.rooms, model.doors, model.windows,
+    ):
+        for item in collection:
+            item.metadata.review_status = ReviewStatus.CONFIRMED
+    model.validation_issues = validate_model(model)
+
+    summary = calculate_quantities(model, QuantityBasis.VERIFIED)
+
+    assert summary.counts["doors"] == 1
+    assert summary.counts["windows"] == 1
+    assert summary.calibrated_measurements["wall_centerline_length"] == 20
+    assert summary.calibrated_measurements["floor_area"] == 100
+    assert summary.calibrated_measurements["opening_width"] == 3.5
+    assert summary.complete is True
+    assert summary.authoritative is True
+
+
+def test_verified_quantities_exclude_door_without_confirmed_opening():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    door = model.doors[0]
+    opening = next(item for item in model.openings if item.id == door.opening_id)
+    wall = next(item for item in model.walls if item.id == opening.wall_id)
+    door.metadata.review_status = ReviewStatus.CONFIRMED
+    wall.metadata.review_status = ReviewStatus.CONFIRMED
+
+    summary = calculate_quantities(model, QuantityBasis.VERIFIED)
+
+    assert summary.counts["doors"] == 0
+    assert door.id in summary.excluded_object_ids
+    assert summary.complete is False
+    assert any("dependencies" in warning for warning in summary.warnings)
 
 
 def test_legacy_schema_remains_unchanged():
