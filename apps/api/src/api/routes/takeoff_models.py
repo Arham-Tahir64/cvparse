@@ -17,6 +17,7 @@ from vision.domain.commands import (
     delete_wall,
     DomainCommandError,
     move_wall_endpoint,
+    recompute_room_topology,
     redo_last_edit,
     set_approval_status,
     set_opening_kind,
@@ -220,6 +221,22 @@ def redo_model_edit(
     snapshot = _get_revision(repository, model_id, model.redo_revision_stack[-1])
     try:
         updated = redo_last_edit(model, snapshot, actor=request.actor)
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.post("/{model_id}/rooms/recompute")
+def recompute_model_rooms(
+    model_id: str,
+    request: HistoryUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = recompute_room_topology(model, actor=request.actor)
     except DomainCommandError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _save(repository, updated, request.expected_revision)

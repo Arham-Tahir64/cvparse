@@ -33,6 +33,7 @@ from vision.domain.commands import (
     delete_wall,
     DomainCommandError,
     move_wall_endpoint,
+    recompute_room_topology,
     redo_last_edit,
     set_approval_status,
     set_opening_kind,
@@ -923,6 +924,117 @@ def test_delete_unclassified_opening_needs_no_cascade():
 
     assert not any(item.id == opening_id for item in deleted.openings)
     assert deleted.edit_history[-1].payload["cascade"] is False
+
+
+def _closed_room_model():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    bottom = add_wall(
+        model,
+        start=Coordinate(220, 220),
+        end=Coordinate(20, 220),
+        thickness_px=12,
+    )
+    return add_wall(
+        bottom,
+        start=Coordinate(20, 220),
+        end=Coordinate(20, 20),
+        thickness_px=12,
+    )
+
+
+def test_room_topology_recompute_recovers_face_relations_and_stable_id():
+    closed = _closed_room_model()
+    original_room_id = closed.rooms[0].id
+    assert any(
+        issue.code == "room.topology_stale" for issue in closed.validation_issues
+    )
+
+    updated = recompute_room_topology(closed, actor="room-editor")
+
+    assert updated.revision == closed.revision + 1
+    assert len(updated.rooms) == 1
+    room = updated.rooms[0]
+    assert room.id == original_room_id
+    assert room.label == "OFFICE"
+    assert room.area_px == 40000
+    assert room.perimeter_px == 800
+    assert set(room.boundary_wall_ids) == {wall.id for wall in updated.walls}
+    assert room.door_ids == [updated.doors[0].id]
+    assert room.window_ids == [updated.windows[0].id]
+    assert room.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert room.metadata.source.stage == "room_topology_recompute"
+    assert room.metadata.review_status == ReviewStatus.NEEDS_REVIEW
+    assert not any(
+        issue.code == "room.topology_stale" for issue in updated.validation_issues
+    )
+    assert updated.edit_history[-1].action == "recompute_room_topology"
+    assert updated.edit_history[-1].payload["matched_room_ids"] == [original_room_id]
+    assert calculate_quantities(updated).pixel_measurements["floor_area_px"] == 40000
+
+    undone = undo_last_edit(updated, closed)
+    assert any(
+        issue.code == "room.topology_stale" for issue in undone.validation_issues
+    )
+    redone = redo_last_edit(undone, updated)
+    assert redone.rooms[0].id == original_room_id
+    assert not any(
+        issue.code == "room.topology_stale" for issue in redone.validation_issues
+    )
+
+
+def test_room_topology_recompute_splits_face_and_builds_adjacency():
+    room_model = recompute_room_topology(_closed_room_model())
+    top = next(
+        wall for wall in room_model.walls
+        if wall.start.y == wall.end.y == 20
+    )
+    bottom = next(
+        wall for wall in room_model.walls
+        if wall.start.y == wall.end.y == 220
+    )
+    split_top = split_wall(
+        room_model, wall_id=top.id, point=Coordinate(120, 20),
+    )
+    split_bottom = split_wall(
+        split_top, wall_id=bottom.id, point=Coordinate(120, 220),
+    )
+    top_node = split_top.edit_history[-1].payload["split_node_id"]
+    bottom_node = split_bottom.edit_history[-1].payload["split_node_id"]
+    top_point = next(node.point for node in split_bottom.nodes if node.id == top_node)
+    bottom_point = next(node.point for node in split_bottom.nodes if node.id == bottom_node)
+    divided = add_wall(
+        split_bottom,
+        start=top_point,
+        end=bottom_point,
+        thickness_px=12,
+    )
+    divider_id = divided.edit_history[-1].payload["wall_id"]
+
+    updated = recompute_room_topology(divided)
+
+    assert len(updated.rooms) == 2
+    assert sorted(room.area_px for room in updated.rooms) == [20000, 20000]
+    assert sum(room.area_px for room in updated.rooms) == 40000
+    assert all(divider_id in room.boundary_wall_ids for room in updated.rooms)
+    assert all(len(room.neighboring_room_ids) == 1 for room in updated.rooms)
+    assert updated.rooms[0].neighboring_room_ids == [updated.rooms[1].id]
+    assert updated.rooms[1].neighboring_room_ids == [updated.rooms[0].id]
+    assert sum(room.label == "OFFICE" for room in updated.rooms) == 1
+    assert len(updated.edit_history[-1].payload["created_room_ids"]) == 1
+    assert not any(
+        issue.code == "room.topology_stale" for issue in updated.validation_issues
+    )
+    assert calculate_quantities(updated).pixel_measurements["floor_area_px"] == 40000
+
+    without_divider = delete_wall(updated, wall_id=divider_id, cascade=True)
+    merged = recompute_room_topology(without_divider)
+
+    assert len(merged.rooms) == 1
+    assert merged.rooms[0].area_px == 40000
+    assert merged.rooms[0].neighboring_room_ids == []
+    assert divider_id not in merged.rooms[0].boundary_wall_ids
+    assert len(merged.edit_history[-1].payload["removed_room_ids"]) == 1
+    assert calculate_quantities(merged).pixel_measurements["floor_area_px"] == 40000
 
 
 def test_delete_manual_wall_repairs_graph_and_is_undoable():

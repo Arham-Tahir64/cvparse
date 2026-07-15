@@ -609,6 +609,70 @@ def test_persisted_opening_reclassify_delete_and_undo(client):
     assert any(item["id"] == window_id for item in restored["windows"])
 
 
+def test_persisted_room_topology_recompute_creates_closed_manual_face(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    revision = 1
+    manual_wall_ids = []
+    for start, end in (
+        ((10, 10), (100, 10)),
+        ((100, 10), (100, 100)),
+        ((100, 100), (10, 100)),
+        ((10, 100), (10, 10)),
+    ):
+        response = client.post(
+            f"/api/takeoff/models/{model_id}/walls",
+            json={
+                "expected_revision": revision,
+                "start_x": start[0],
+                "start_y": start[1],
+                "end_x": end[0],
+                "end_y": end[1],
+                "thickness_px": 8,
+            },
+        )
+        assert response.status_code == 200
+        model = response.json()["model"]
+        manual_wall_ids.append(model["edit_history"][-1]["payload"]["wall_id"])
+        revision += 1
+
+    recomputed_response = client.post(
+        f"/api/takeoff/models/{model_id}/rooms/recompute",
+        json={"expected_revision": revision, "actor": "room-editor"},
+    )
+    assert recomputed_response.status_code == 200
+    recomputed = recomputed_response.json()["model"]
+    assert recomputed["revision"] == revision + 1
+    manual_face = next(
+        room for room in recomputed["rooms"]
+        if set(manual_wall_ids).issubset(room["boundary_wall_ids"])
+    )
+    assert manual_face["area_px"] == 8100
+    assert manual_face["perimeter_px"] == 360
+    assert manual_face["metadata"]["source"]["stage"] == "room_topology_recompute"
+    assert not any(
+        issue["code"] == "room.topology_stale"
+        for issue in recomputed["validation_issues"]
+    )
+    quantities = client.get(
+        f"/api/takeoff/models/{model_id}/quantities"
+    ).json()["quantities"]
+    assert quantities["model_revision"] == revision + 1
+    assert manual_face["id"] in quantities["included_object_ids"]
+
+    undo_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": revision + 1},
+    )
+    assert undo_response.status_code == 200
+    undone = undo_response.json()["model"]
+    assert not any(room["id"] == manual_face["id"] for room in undone["rooms"])
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

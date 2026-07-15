@@ -39,6 +39,7 @@ from .models import (
 )
 from .validation import validate_model
 from .quantities import QuantityBasis, calculate_quantities
+from .topology import RoomTopologyError, recompute_room_faces
 
 
 class DomainCommandError(ValueError):
@@ -1233,6 +1234,37 @@ def delete_opening(
             "cascade": cascade,
             "deleted_door_ids": sorted(door_ids),
             "deleted_window_ids": sorted(window_ids),
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def recompute_room_topology(
+    model: TakeoffModel,
+    *,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Replace stale room geometry with faces from the current wall graph."""
+    _ensure_editable(model)
+    try:
+        result = recompute_room_faces(model)
+    except RoomTopologyError as exc:
+        raise DomainCommandError(str(exc)) from exc
+    updated = _prepare_edit(model)
+    before_room_ids = {room.id for room in updated.rooms}
+    updated.rooms = result.rooms
+    changed_ids = sorted(before_room_ids | {room.id for room in result.rooms})
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "recompute_room_topology", actor, before, changed_ids,
+        {
+            "matched_room_ids": result.matched_room_ids,
+            "created_room_ids": result.created_room_ids,
+            "removed_room_ids": result.removed_room_ids,
+            "room_count_before": len(before_room_ids),
+            "room_count_after": len(result.rooms),
         },
     ))
     updated.validation_issues = validate_model(updated)
