@@ -43,6 +43,23 @@ def test_takeoff_route(client):
     assert len(body["takeoff"]["rooms"]) == 1
     assert body["annotations"] is not None
     assert any(e["type"] == "wall" for e in body["annotations"]["elements"])
+    assert "model" not in body
+
+
+def test_takeoff_route_can_include_editable_model(client):
+    response = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"include_model": "true"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["takeoff"]["schema_version"] == "1.0.0"
+    assert body["model"]["schema_version"] == "2.0.0-alpha.1"
+    assert len(body["model"]["source"]["fingerprint"]) == 64
+    assert body["model"]["validation_issues"][0]["code"] == "scale.unconfirmed"
+    assert body["model"]["walls"]
 
 
 def test_takeoff_route_unsupported_mime(client):
