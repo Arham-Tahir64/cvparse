@@ -177,6 +177,12 @@ def from_json_dict(data: dict[str, Any]) -> TakeoffModel:
         id=data["id"], source=source, scale=scale, nodes=nodes, walls=walls,
         openings=openings, doors=doors, windows=windows, rooms=rooms,
         validation_issues=issues, edit_history=history,
+        undo_revision_stack=[
+            int(revision) for revision in data.get("undo_revision_stack", [])
+        ],
+        redo_revision_stack=[
+            int(revision) for revision in data.get("redo_revision_stack", [])
+        ],
         revision=int(data.get("revision", 1)),
         approval_status=ApprovalStatus(
             data.get("approval_status", ApprovalStatus.DRAFT.value)

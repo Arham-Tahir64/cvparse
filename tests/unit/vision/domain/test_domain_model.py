@@ -29,9 +29,11 @@ from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
+    redo_last_edit,
     set_approval_status,
     set_review_status,
     set_scale,
+    undo_last_edit,
 )
 from vision.domain.geometry import distance, point_at_offset, polygon_area
 from vision.domain.models import (
@@ -41,7 +43,11 @@ from vision.domain.models import (
     OpeningKind,
     ReviewStatus,
 )
-from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
+from vision.domain.repository import (
+    InMemoryModelRepository,
+    JsonFileModelRepository,
+    RevisionConflictError,
+)
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.serialize import from_json_dict, to_json_dict
 from vision.domain.source_assets import (
@@ -232,6 +238,113 @@ def test_json_repository_persists_and_rejects_stale_revision(tmp_path):
         pass
     else:
         raise AssertionError("stale write was not rejected")
+
+
+def test_undo_redo_restores_full_state_and_appends_audit_events():
+    repository = InMemoryModelRepository()
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    repository.save(original)
+    scaled = set_scale(original, pixels_per_unit=20, unit="ft", actor="scale-user")
+    repository.save(scaled, expected_revision=1)
+    wall_id = scaled.walls[0].id
+    reviewed = set_review_status(
+        scaled, object_id=wall_id, status=ReviewStatus.CONFIRMED,
+        actor="review-user",
+    )
+    repository.save(reviewed, expected_revision=2)
+
+    assert reviewed.undo_revision_stack == [1, 2]
+    assert reviewed.redo_revision_stack == []
+    undone = undo_last_edit(
+        reviewed,
+        repository.get_revision(reviewed.id, reviewed.undo_revision_stack[-1]),
+        actor="undo-user",
+    )
+    repository.save(undone, expected_revision=3)
+
+    undone_wall = next(wall for wall in undone.walls if wall.id == wall_id)
+    assert undone.revision == 4
+    assert undone_wall.metadata.review_status == ReviewStatus.LIKELY_CORRECT
+    assert undone.scale.pixels_per_unit == 20
+    assert undone.undo_revision_stack == [1]
+    assert undone.redo_revision_stack == [3]
+    assert [event.action for event in undone.edit_history] == [
+        "set_scale", "set_review_status", "undo",
+    ]
+    assert undone.edit_history[-1].affected_object_ids == [wall_id]
+    assert undone.edit_history[-1].payload["restored_snapshot_revision"] == 2
+    assert repository.get_revision(reviewed.id, 3).walls[0].metadata.review_status == (
+        ReviewStatus.CONFIRMED
+    )
+
+    redone = redo_last_edit(
+        undone,
+        repository.get_revision(undone.id, undone.redo_revision_stack[-1]),
+        actor="redo-user",
+    )
+    repository.save(redone, expected_revision=4)
+
+    redone_wall = next(wall for wall in redone.walls if wall.id == wall_id)
+    assert redone.revision == 5
+    assert redone_wall.metadata.review_status == ReviewStatus.CONFIRMED
+    assert redone.undo_revision_stack == [1, 4]
+    assert redone.redo_revision_stack == []
+    assert [event.action for event in redone.edit_history] == [
+        "set_scale", "set_review_status", "undo", "redo",
+    ]
+    assert redone.edit_history[-1].affected_object_ids == [wall_id]
+    assert redone.edit_history[-1].payload["restored_snapshot_revision"] == 3
+
+
+def test_new_edit_after_undo_invalidates_redo_branch():
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    scaled = set_scale(original, pixels_per_unit=20, unit="ft")
+    reviewed = set_review_status(
+        scaled, object_id=scaled.walls[0].id, status=ReviewStatus.CONFIRMED,
+    )
+    undone = undo_last_edit(reviewed, scaled)
+
+    branched = set_scale(undone, pixels_per_unit=21, unit="ft")
+
+    assert undone.redo_revision_stack == [3]
+    assert branched.undo_revision_stack == [1, 4]
+    assert branched.redo_revision_stack == []
+    try:
+        redo_last_edit(branched, reviewed)
+    except DomainCommandError as exc:
+        assert "nothing to redo" in str(exc)
+    else:
+        raise AssertionError("redo survived a new branch edit")
+
+
+def test_json_revision_history_survives_repository_restart(tmp_path):
+    repository = JsonFileModelRepository(tmp_path)
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    repository.save(original)
+    scaled = set_scale(original, pixels_per_unit=20, unit="ft")
+    repository.save(scaled, expected_revision=1)
+    reviewed = set_review_status(
+        scaled, object_id=scaled.walls[0].id, status=ReviewStatus.CONFIRMED,
+    )
+    repository.save(reviewed, expected_revision=2)
+
+    restarted = JsonFileModelRepository(tmp_path)
+    assert restarted.get(original.id).revision == 3
+    assert [restarted.get_revision(original.id, revision).revision for revision in (1, 2, 3)] == [
+        1, 2, 3,
+    ]
+    undone = undo_last_edit(restarted.get(original.id), restarted.get_revision(original.id, 2))
+    restarted.save(undone, expected_revision=3)
+
+    restarted_again = JsonFileModelRepository(tmp_path)
+    assert restarted_again.get(original.id).revision == 4
+    assert restarted_again.get_revision(original.id, 3).walls[0].metadata.review_status == (
+        ReviewStatus.CONFIRMED
+    )
+    assert restarted_again.get(original.id).walls[0].metadata.review_status == (
+        ReviewStatus.LIKELY_CORRECT
+    )
+    assert list(tmp_path.rglob("*.tmp")) == []
 
 
 def test_move_shared_wall_endpoint_recomputes_only_graph_dependents():
@@ -544,6 +657,35 @@ def test_approved_model_is_frozen_until_explicitly_reopened():
     assert reopened.approval_status == ApprovalStatus.IN_REVIEW
     assert edited.scale.pixels_per_unit == 21
     assert edited.revision == reopened.revision + 1
+
+
+def test_approved_model_blocks_history_restore_until_reopened():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    for collection in (
+        model.walls, model.openings, model.rooms, model.doors, model.windows,
+    ):
+        for item in collection:
+            item.metadata.review_status = ReviewStatus.CONFIRMED
+    model.validation_issues = validate_model(model)
+    approved = set_approval_status(model, status=ApprovalStatus.APPROVED)
+
+    try:
+        undo_last_edit(approved, model)
+    except DomainCommandError as exc:
+        assert "reopened explicitly" in str(exc)
+    else:
+        raise AssertionError("approved model allowed undo")
+
+    reopened = set_approval_status(approved, status=ApprovalStatus.IN_REVIEW)
+    edited = set_scale(reopened, pixels_per_unit=21, unit="ft")
+    restored = undo_last_edit(edited, reopened)
+
+    assert restored.approval_status == ApprovalStatus.IN_REVIEW
+    assert restored.scale.pixels_per_unit == 20
+    assert restored.edit_history[-1].action == "undo"
 
 
 def test_legacy_schema_remains_unchanged():

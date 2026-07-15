@@ -56,6 +56,13 @@ def _ensure_editable(model: TakeoffModel) -> None:
         )
 
 
+def _prepare_edit(model: TakeoffModel) -> TakeoffModel:
+    updated = copy.deepcopy(model)
+    updated.undo_revision_stack.append(model.revision)
+    updated.redo_revision_stack.clear()
+    return updated
+
+
 def set_scale(
     model: TakeoffModel,
     *,
@@ -70,7 +77,7 @@ def set_scale(
     if not unit.strip():
         raise DomainCommandError("unit is required")
 
-    updated = copy.deepcopy(model)
+    updated = _prepare_edit(model)
     before = updated.revision
     previous = {
         "pixels_per_unit": updated.scale.pixels_per_unit,
@@ -130,7 +137,7 @@ def set_review_status(
 ) -> TakeoffModel:
     """Confirm, reject, or reopen one object without rerunning extraction."""
     _ensure_editable(model)
-    updated = copy.deepcopy(model)
+    updated = _prepare_edit(model)
     metadata = _editable_metadata(updated, object_id)
     before = updated.revision
     previous_status = metadata.review_status
@@ -234,7 +241,7 @@ def move_wall_endpoint(
                 "move or resize the opening first"
             )
 
-    updated = copy.deepcopy(model)
+    updated = _prepare_edit(model)
     before_revision = updated.revision
     changed_ids: set[str] = {node_id}
     node = next(item for item in updated.nodes if item.id == node_id)
@@ -352,7 +359,7 @@ def set_approval_status(
             "approved models must be reopened to in_review before other transitions"
         )
 
-    updated = copy.deepcopy(model)
+    updated = _prepare_edit(model)
     before = updated.revision
     if status == ApprovalStatus.APPROVED:
         updated.validation_issues = validate_model(updated)
@@ -372,3 +379,88 @@ def set_approval_status(
     ))
     updated.validation_issues = validate_model(updated)
     return updated
+
+
+def _changed_object_ids(first: TakeoffModel, second: TakeoffModel) -> list[str]:
+    changed: set[str] = set()
+    if first.scale != second.scale or first.approval_status != second.approval_status:
+        changed.add(first.id)
+    for first_collection, second_collection in zip(
+        (first.nodes, first.walls, first.openings, first.doors, first.windows, first.rooms),
+        (second.nodes, second.walls, second.openings, second.doors, second.windows, second.rooms),
+    ):
+        first_by_id = {item.id: item for item in first_collection}
+        second_by_id = {item.id: item for item in second_collection}
+        for object_id in first_by_id.keys() | second_by_id.keys():
+            if first_by_id.get(object_id) != second_by_id.get(object_id):
+                changed.add(object_id)
+    return sorted(changed)
+
+
+def _restore_snapshot(
+    model: TakeoffModel,
+    snapshot: TakeoffModel,
+    *,
+    action: str,
+    actor: str,
+) -> TakeoffModel:
+    _ensure_editable(model)
+    if snapshot.id != model.id:
+        raise DomainCommandError("history snapshot belongs to a different model")
+    if action == "undo":
+        if not model.undo_revision_stack:
+            raise DomainCommandError("nothing to undo")
+        expected = model.undo_revision_stack[-1]
+        if snapshot.revision != expected:
+            raise DomainCommandError(
+                f"undo requires revision {expected}, got {snapshot.revision}"
+            )
+        undo_stack = list(model.undo_revision_stack[:-1])
+        redo_stack = [*model.redo_revision_stack, model.revision]
+    elif action == "redo":
+        if not model.redo_revision_stack:
+            raise DomainCommandError("nothing to redo")
+        expected = model.redo_revision_stack[-1]
+        if snapshot.revision != expected:
+            raise DomainCommandError(
+                f"redo requires revision {expected}, got {snapshot.revision}"
+            )
+        undo_stack = [*model.undo_revision_stack, model.revision]
+        redo_stack = list(model.redo_revision_stack[:-1])
+    else:
+        raise DomainCommandError("history action must be undo or redo")
+
+    restored = copy.deepcopy(snapshot)
+    changed_ids = _changed_object_ids(model, restored)
+    before = model.revision
+    restored.revision = before + 1
+    restored.edit_history = list(model.edit_history)
+    restored.undo_revision_stack = undo_stack
+    restored.redo_revision_stack = redo_stack
+    restored.validation_issues = validate_model(restored)
+    restored.edit_history.append(_event(
+        restored, action, actor, before, changed_ids or [model.id],
+        {
+            "restored_snapshot_revision": snapshot.revision,
+            "abandoned_revision": model.revision,
+        },
+    ))
+    return restored
+
+
+def undo_last_edit(
+    model: TakeoffModel,
+    snapshot: TakeoffModel,
+    *,
+    actor: str = "user",
+) -> TakeoffModel:
+    return _restore_snapshot(model, snapshot, action="undo", actor=actor)
+
+
+def redo_last_edit(
+    model: TakeoffModel,
+    snapshot: TakeoffModel,
+    *,
+    actor: str = "user",
+) -> TakeoffModel:
+    return _restore_snapshot(model, snapshot, action="redo", actor=actor)

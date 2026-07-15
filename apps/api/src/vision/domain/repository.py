@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import uuid
 from pathlib import Path
 from typing import Protocol
 
@@ -23,8 +24,14 @@ class RevisionConflictError(ModelRepositoryError):
     pass
 
 
+class ModelRevisionNotFoundError(ModelRepositoryError):
+    pass
+
+
 class ModelRepository(Protocol):
     def get(self, model_id: str) -> TakeoffModel: ...
+
+    def get_revision(self, model_id: str, revision: int) -> TakeoffModel: ...
 
     def save(
         self, model: TakeoffModel, *, expected_revision: int | None = None,
@@ -67,6 +74,7 @@ class InMemoryModelRepository:
 
     def __init__(self):
         self._models: dict[str, TakeoffModel] = {}
+        self._revisions: dict[str, dict[int, TakeoffModel]] = {}
         self._lock = threading.RLock()
 
     def get(self, model_id: str) -> TakeoffModel:
@@ -76,12 +84,25 @@ class InMemoryModelRepository:
             except KeyError as exc:
                 raise ModelNotFoundError(f"model {model_id} was not found") from exc
 
+    def get_revision(self, model_id: str, revision: int) -> TakeoffModel:
+        with self._lock:
+            try:
+                return _copy(self._revisions[model_id][revision])
+            except KeyError as exc:
+                raise ModelRevisionNotFoundError(
+                    f"model {model_id} revision {revision} was not found"
+                ) from exc
+
     def save(
         self, model: TakeoffModel, *, expected_revision: int | None = None,
     ) -> None:
         with self._lock:
             current = self._models.get(model.id)
             _check_revision(current, model, expected_revision)
+            history = self._revisions.setdefault(model.id, {})
+            if current is not None:
+                history.setdefault(current.revision, _copy(current))
+            history[model.revision] = _copy(model)
             self._models[model.id] = _copy(model)
 
 
@@ -110,6 +131,26 @@ class JsonFileModelRepository:
             return None
         return from_json_dict(json.loads(path.read_text(encoding="utf-8")))
 
+    def _revision_path(self, model_id: str, revision: int) -> Path:
+        if revision < 1:
+            raise ModelRepositoryError("model revision must be positive")
+        self._path(model_id)
+        return self.root / ".revisions" / model_id / f"{revision}.json"
+
+    @staticmethod
+    def _write_atomic(path: Path, model: TakeoffModel) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(to_json_dict(model), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
     def get(self, model_id: str) -> TakeoffModel:
         with self._lock:
             model = self._read_unlocked(model_id)
@@ -117,17 +158,32 @@ class JsonFileModelRepository:
                 raise ModelNotFoundError(f"model {model_id} was not found")
             return model
 
+    def get_revision(self, model_id: str, revision: int) -> TakeoffModel:
+        with self._lock:
+            path = self._revision_path(model_id, revision)
+            if not path.exists():
+                raise ModelRevisionNotFoundError(
+                    f"model {model_id} revision {revision} was not found"
+                )
+            return from_json_dict(json.loads(path.read_text(encoding="utf-8")))
+
     def save(
         self, model: TakeoffModel, *, expected_revision: int | None = None,
     ) -> None:
         with self._lock:
             current = self._read_unlocked(model.id)
             _check_revision(current, model, expected_revision)
-            self.root.mkdir(parents=True, exist_ok=True)
-            path = self._path(model.id)
-            temporary = path.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(to_json_dict(model), indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(path)
+            if current is not None:
+                current_history = self._revision_path(model.id, current.revision)
+                if not current_history.exists():
+                    self._write_atomic(current_history, current)
+            incoming_history = self._revision_path(model.id, model.revision)
+            if incoming_history.exists():
+                archived = from_json_dict(json.loads(incoming_history.read_text(encoding="utf-8")))
+                if to_json_dict(archived) != to_json_dict(model):
+                    raise ModelRepositoryError(
+                        f"revision {model.revision} archive already has different content"
+                    )
+            else:
+                self._write_atomic(incoming_history, model)
+            self._write_atomic(self._path(model.id), model)

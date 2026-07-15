@@ -1,7 +1,7 @@
 """Read and revise persisted editable takeoff models."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 
 from api.model_store import get_model_repository, get_source_asset_repository
@@ -13,14 +13,17 @@ from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
+    redo_last_edit,
     set_approval_status,
     set_review_status,
     set_scale,
+    undo_last_edit,
 )
 from vision.domain.models import ApprovalStatus, Coordinate, ReviewStatus
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.repository import (
     ModelNotFoundError,
+    ModelRevisionNotFoundError,
     ModelRepository,
     RevisionConflictError,
 )
@@ -62,6 +65,11 @@ class ApprovalUpdate(BaseModel):
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
+class HistoryUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
 def _get(repository: ModelRepository, model_id: str):
     try:
         return repository.get(model_id)
@@ -87,12 +95,66 @@ def _save(repository: ModelRepository, model, expected_revision: int) -> None:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+def _get_revision(repository: ModelRepository, model_id: str, revision: int):
+    try:
+        return repository.get_revision(model_id, revision)
+    except ModelRevisionNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/{model_id}")
 def get_model(
     model_id: str,
     repository: ModelRepository = Depends(get_model_repository),
 ):
     return {"model": to_json_dict(_get(repository, model_id))}
+
+
+@router.get("/{model_id}/revisions/{revision}")
+def get_model_revision(
+    model_id: str,
+    revision: int = Path(ge=1),
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    return {"model": to_json_dict(_get_revision(repository, model_id, revision))}
+
+
+@router.post("/{model_id}/undo")
+def undo_model_edit(
+    model_id: str,
+    request: HistoryUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    if not model.undo_revision_stack:
+        raise HTTPException(status_code=422, detail="nothing to undo")
+    snapshot = _get_revision(repository, model_id, model.undo_revision_stack[-1])
+    try:
+        updated = undo_last_edit(model, snapshot, actor=request.actor)
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.post("/{model_id}/redo")
+def redo_model_edit(
+    model_id: str,
+    request: HistoryUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    if not model.redo_revision_stack:
+        raise HTTPException(status_code=422, detail="nothing to redo")
+    snapshot = _get_revision(repository, model_id, model.redo_revision_stack[-1])
+    try:
+        updated = redo_last_edit(model, snapshot, actor=request.actor)
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
 
 
 @router.get("/{model_id}/annotations")

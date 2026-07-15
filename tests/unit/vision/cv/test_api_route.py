@@ -67,7 +67,7 @@ def test_takeoff_route_can_include_editable_model(client):
     assert response.status_code == 200
     body = response.json()
     assert body["takeoff"]["schema_version"] == "1.0.0"
-    assert body["model"]["schema_version"] == "2.0.0-alpha.1"
+    assert body["model"]["schema_version"] == "2.0.0-alpha.2"
     assert len(body["model"]["source"]["fingerprint"]) == 64
     assert body["model"]["validation_issues"][0]["code"] == "scale.unconfirmed"
     assert body["model"]["walls"]
@@ -140,6 +140,85 @@ def test_persisted_model_scale_review_and_revision_workflow(client):
     )
     assert incomplete_approval.status_code == 422
     assert "cannot be approved" in incomplete_approval.json()["detail"]
+
+
+def test_persisted_model_undo_redo_history_and_branching(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    wall_id = created["walls"][0]["id"]
+    scaled = client.put(
+        f"/api/takeoff/models/{model_id}/scale",
+        json={"expected_revision": 1, "pixels_per_unit": 20, "unit": "ft"},
+    ).json()["model"]
+    reviewed = client.put(
+        f"/api/takeoff/models/{model_id}/objects/{wall_id}/review",
+        json={"expected_revision": 2, "status": "confirmed"},
+    ).json()["model"]
+
+    stale = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 2},
+    )
+    assert stale.status_code == 409
+    undone_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 3, "actor": "undo-user"},
+    )
+    assert undone_response.status_code == 200
+    undone = undone_response.json()["model"]
+    undone_wall = next(wall for wall in undone["walls"] if wall["id"] == wall_id)
+    assert undone["revision"] == 4
+    assert undone_wall["metadata"]["review_status"] == "likely_correct"
+    assert undone["undo_revision_stack"] == [1]
+    assert undone["redo_revision_stack"] == [3]
+    assert undone["edit_history"][-1]["action"] == "undo"
+
+    historical_response = client.get(
+        f"/api/takeoff/models/{model_id}/revisions/3"
+    )
+    assert historical_response.status_code == 200
+    historical = historical_response.json()["model"]
+    historical_wall = next(
+        wall for wall in historical["walls"] if wall["id"] == wall_id
+    )
+    assert historical_wall["metadata"]["review_status"] == "confirmed"
+    assert client.get(
+        f"/api/takeoff/models/{model_id}/revisions/999"
+    ).status_code == 409
+
+    redone_response = client.post(
+        f"/api/takeoff/models/{model_id}/redo",
+        json={"expected_revision": 4, "actor": "redo-user"},
+    )
+    assert redone_response.status_code == 200
+    redone = redone_response.json()["model"]
+    redone_wall = next(wall for wall in redone["walls"] if wall["id"] == wall_id)
+    assert redone["revision"] == 5
+    assert redone_wall["metadata"]["review_status"] == "confirmed"
+    assert redone["redo_revision_stack"] == []
+    assert redone["edit_history"][-1]["action"] == "redo"
+
+    undone_again = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 5},
+    ).json()["model"]
+    branched = client.put(
+        f"/api/takeoff/models/{model_id}/scale",
+        json={"expected_revision": 6, "pixels_per_unit": 21, "unit": "ft"},
+    ).json()["model"]
+    assert undone_again["redo_revision_stack"]
+    assert branched["revision"] == 7
+    assert branched["redo_revision_stack"] == []
+    no_redo = client.post(
+        f"/api/takeoff/models/{model_id}/redo",
+        json={"expected_revision": 7},
+    )
+    assert no_redo.status_code == 422
+    assert no_redo.json()["detail"] == "nothing to redo"
 
 
 def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):

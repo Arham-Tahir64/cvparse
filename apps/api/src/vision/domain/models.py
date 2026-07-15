@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any
 
 
-MODEL_SCHEMA_VERSION = "2.0.0-alpha.1"
+MODEL_SCHEMA_VERSION = "2.0.0-alpha.2"
 
 
 class ReviewStatus(str, Enum):
@@ -231,6 +231,8 @@ class TakeoffModel:
     rooms: list[Room] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
     edit_history: list[EditEvent] = field(default_factory=list)
+    undo_revision_stack: list[int] = field(default_factory=list)
+    redo_revision_stack: list[int] = field(default_factory=list)
     revision: int = 1
     approval_status: ApprovalStatus = ApprovalStatus.DRAFT
     schema_version: str = MODEL_SCHEMA_VERSION
