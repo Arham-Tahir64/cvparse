@@ -19,6 +19,7 @@ from vision.domain.commands import (
     set_approval_status,
     set_review_status,
     set_scale,
+    split_wall,
     undo_last_edit,
 )
 from vision.domain.models import ApprovalStatus, Coordinate, ReviewStatus
@@ -76,6 +77,14 @@ class WallCreate(BaseModel):
 class WallDelete(BaseModel):
     expected_revision: int = Field(ge=1)
     cascade: bool = False
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class WallSplit(BaseModel):
+    expected_revision: int = Field(ge=1)
+    x: float
+    y: float
+    projection_tolerance_px: float | None = Field(default=None, ge=0)
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
@@ -351,6 +360,29 @@ def remove_wall(
     try:
         updated = delete_wall(
             model, wall_id=wall_id, cascade=request.cascade, actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.post("/{model_id}/walls/{wall_id}/split")
+def split_model_wall(
+    model_id: str,
+    wall_id: str,
+    request: WallSplit,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = split_wall(
+            model,
+            wall_id=wall_id,
+            point=Coordinate(request.x, request.y),
+            projection_tolerance_px=request.projection_tolerance_px,
+            actor=request.actor,
         )
     except DomainCommandError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

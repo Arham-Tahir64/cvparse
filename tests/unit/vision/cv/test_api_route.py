@@ -367,6 +367,69 @@ def test_persisted_wall_create_delete_quantities_and_undo(client):
     assert any(item["id"] == wall_id for item in restored["walls"])
 
 
+def test_persisted_wall_split_preserves_length_and_is_undoable(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    added = client.post(
+        f"/api/takeoff/models/{model_id}/walls",
+        json={
+            "expected_revision": 1,
+            "start_x": 10,
+            "start_y": 10,
+            "end_x": 100,
+            "end_y": 10,
+            "thickness_px": 8,
+            "snap_tolerance_px": 0,
+        },
+    ).json()["model"]
+    wall_id = added["edit_history"][-1]["payload"]["wall_id"]
+
+    split_response = client.post(
+        f"/api/takeoff/models/{model_id}/walls/{wall_id}/split",
+        json={
+            "expected_revision": 2,
+            "x": 55,
+            "y": 13,
+            "projection_tolerance_px": 4,
+            "actor": "wall-editor",
+        },
+    )
+    assert split_response.status_code == 200
+    split = split_response.json()["model"]
+    event = split["edit_history"][-1]
+    child_id = event["payload"]["new_wall_id"]
+    parent = next(item for item in split["walls"] if item["id"] == wall_id)
+    child = next(item for item in split["walls"] if item["id"] == child_id)
+    assert split["revision"] == 3
+    assert parent["length_px"] == 45
+    assert child["length_px"] == 45
+    assert parent["metadata"]["source"]["kind"] == "manual_adjusted"
+    assert child["metadata"]["source"]["kind"] == "manual_created"
+    quantities = client.get(
+        f"/api/takeoff/models/{model_id}/quantities"
+    ).json()["quantities"]
+    split_pair_length = sum(
+        item["length_px"] for item in split["walls"]
+        if item["id"] in {wall_id, child_id}
+    )
+    assert split_pair_length == 90
+    assert quantities["model_revision"] == 3
+
+    undo_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 3},
+    )
+    assert undo_response.status_code == 200
+    undone = undo_response.json()["model"]
+    restored = next(item for item in undone["walls"] if item["id"] == wall_id)
+    assert restored["length_px"] == 90
+    assert not any(item["id"] == child_id for item in undone["walls"])
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

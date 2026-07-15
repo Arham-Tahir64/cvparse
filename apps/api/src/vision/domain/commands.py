@@ -13,6 +13,7 @@ from .geometry import (
     point_on_segment,
     polygon_area,
     polygon_perimeter,
+    project_point_to_segment,
     segments_intersect,
     transform_wall_local_point,
     wall_orientation,
@@ -559,6 +560,238 @@ def add_wall(
             "start_node_created": start_created,
             "end_node_created": end_created,
             "snap_tolerance_px": tolerance,
+            "affected_room_ids": sorted(affected_room_ids),
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def split_wall(
+    model: TakeoffModel,
+    *,
+    wall_id: str,
+    point: Coordinate,
+    projection_tolerance_px: float | None = None,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Split a wall at a projected interior point while preserving dependencies."""
+    _ensure_editable(model)
+    if not _within_image(model, point):
+        raise DomainCommandError("split point must be finite and within the plan image")
+    selected = _wall_by_id(model, wall_id)
+    tolerance = (
+        max(2.0, selected.thickness_px)
+        if projection_tolerance_px is None else projection_tolerance_px
+    )
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise DomainCommandError(
+            "projection tolerance must be a non-negative finite number"
+        )
+    projected, split_offset, lateral_distance = project_point_to_segment(
+        point, selected.start, selected.end,
+    )
+    if lateral_distance > tolerance:
+        raise DomainCommandError(
+            f"split point is {lateral_distance:.3f} px from the wall centerline, "
+            f"beyond tolerance {tolerance:.3f} px"
+        )
+    endpoint_margin = max(1.0, selected.thickness_px * 0.25)
+    if (
+        split_offset < endpoint_margin
+        or selected.length_px - split_offset < endpoint_margin
+    ):
+        raise DomainCommandError("split point must remain inside both wall endpoints")
+
+    hosted_openings = [
+        opening for opening in model.openings if opening.wall_id == wall_id
+    ]
+    spanning = [
+        opening.id for opening in hosted_openings
+        if opening.start_offset_px + 1e-6 < split_offset
+        < opening.end_offset_px - 1e-6
+    ]
+    if spanning:
+        raise DomainCommandError(
+            "split point crosses opening(s): " + ", ".join(sorted(spanning))
+            + "; move or resize them first"
+        )
+
+    updated = _prepare_edit(model)
+    selected = _wall_by_id(updated, wall_id)
+    old_end = selected.end
+    old_end_node_id = selected.end_node_id
+    split_node = _nearest_node(updated, projected, tolerance)
+    reused_split_node = False
+    if split_node is not None:
+        _, node_offset, node_lateral = project_point_to_segment(
+            split_node.point, selected.start, selected.end,
+        )
+        if (
+            node_lateral <= 1e-3
+            and endpoint_margin <= node_offset <= selected.length_px - endpoint_margin
+        ):
+            projected = split_node.point
+            split_offset = node_offset
+            reused_split_node = True
+        else:
+            split_node = None
+    if split_node is None:
+        split_node = Node(
+            id=f"node_manual_{uuid.uuid4().hex}",
+            point=projected,
+            connected_wall_ids=[],
+            metadata=_manual_created_metadata("split_wall"),
+        )
+        updated.nodes.append(split_node)
+    spanning_after_snap = [
+        opening.id for opening in hosted_openings
+        if opening.start_offset_px + 1e-6 < split_offset
+        < opening.end_offset_px - 1e-6
+    ]
+    if spanning_after_snap:
+        raise DomainCommandError(
+            "snapped split point crosses opening(s): "
+            + ", ".join(sorted(spanning_after_snap))
+            + "; move or resize them first"
+        )
+
+    existing_at_old_end = {
+        wall.id for wall in updated.walls
+        if wall.id != wall_id and old_end_node_id in {
+            wall.start_node_id, wall.end_node_id,
+        }
+    }
+    existing_at_split = set(split_node.connected_wall_ids)
+    new_wall_id = f"wall_manual_{uuid.uuid4().hex}"
+    original_start_node_id = selected.start_node_id
+    original_type = selected.wall_type
+    original_thickness = selected.thickness_px
+    original_length = selected.length_px
+
+    selected.end_node_id = split_node.id
+    selected.end = projected
+    selected.length_px = distance(selected.start, selected.end)
+    selected.length = (
+        selected.length_px / updated.scale.pixels_per_unit
+        if updated.scale.pixels_per_unit else None
+    )
+    selected.orientation = wall_orientation(selected.start, selected.end)
+    selected.polygon = wall_polygon(
+        selected.start, selected.end, selected.thickness_px,
+    )
+    _mark_manual(selected.metadata)
+
+    new_wall = Wall(
+        id=new_wall_id,
+        start_node_id=split_node.id,
+        end_node_id=old_end_node_id,
+        start=projected,
+        end=old_end,
+        polygon=wall_polygon(projected, old_end, original_thickness),
+        thickness_px=original_thickness,
+        wall_type=original_type,
+        orientation=wall_orientation(projected, old_end),
+        connected_wall_ids=[],
+        opening_ids=[],
+        length_px=distance(projected, old_end),
+        length=(
+            distance(projected, old_end) / updated.scale.pixels_per_unit
+            if updated.scale.pixels_per_unit else None
+        ),
+        metadata=_manual_created_metadata("split_wall"),
+    )
+    new_wall.metadata.source.details["parent_wall_id"] = wall_id
+    updated.walls.append(new_wall)
+
+    selected.opening_ids = []
+    doors_by_opening: dict[str, list] = {}
+    for door in updated.doors:
+        doors_by_opening.setdefault(door.opening_id, []).append(door)
+    windows_by_opening: dict[str, list] = {}
+    for window in updated.windows:
+        windows_by_opening.setdefault(window.opening_id, []).append(window)
+    reassigned_opening_ids: list[str] = []
+    changed_ids: set[str] = {
+        wall_id, new_wall_id, split_node.id, old_end_node_id,
+        *existing_at_old_end, *existing_at_split,
+    }
+    for opening in updated.openings:
+        if opening.wall_id != wall_id:
+            continue
+        if opening.start_offset_px >= split_offset - 1e-6:
+            opening.wall_id = new_wall_id
+            opening.start_offset_px -= split_offset
+            opening.end_offset_px -= split_offset
+            opening.center = point_at_offset(
+                new_wall.start, new_wall.end,
+                (opening.start_offset_px + opening.end_offset_px) / 2.0,
+            )
+            opening.orientation = new_wall.orientation
+            new_wall.opening_ids.append(opening.id)
+            _mark_manual(opening.metadata)
+            reassigned_opening_ids.append(opening.id)
+            changed_ids.add(opening.id)
+            for dependent in [
+                *doors_by_opening.get(opening.id, []),
+                *windows_by_opening.get(opening.id, []),
+            ]:
+                _mark_manual(dependent.metadata)
+                changed_ids.add(dependent.id)
+        else:
+            selected.opening_ids.append(opening.id)
+    selected.opening_ids.sort()
+    new_wall.opening_ids.sort()
+
+    if reused_split_node:
+        _mark_manual(split_node.metadata)
+    for node in updated.nodes:
+        if node.id == old_end_node_id:
+            _mark_manual(node.metadata)
+    for adjacent in updated.walls:
+        if adjacent.id in existing_at_old_end | existing_at_split:
+            _mark_manual(adjacent.metadata)
+
+    affected_room_ids: list[str] = []
+    for room in updated.rooms:
+        if wall_id in room.boundary_wall_ids:
+            expanded: list[str] = []
+            for boundary_id in room.boundary_wall_ids:
+                expanded.append(boundary_id)
+                if boundary_id == wall_id:
+                    expanded.append(new_wall_id)
+            room.boundary_wall_ids = expanded
+            affected_room_ids.append(room.id)
+            changed_ids.add(room.id)
+        invalidated = set(
+            room.metadata.source.details.get("topology_invalidated_by_wall_ids", [])
+        )
+        if wall_id in invalidated:
+            invalidated.add(new_wall_id)
+            room.metadata.source.details["topology_invalidated_by_wall_ids"] = sorted(
+                invalidated
+            )
+            _mark_manual(room.metadata)
+            if room.id not in affected_room_ids:
+                affected_room_ids.append(room.id)
+            changed_ids.add(room.id)
+
+    _rebuild_wall_connectivity(updated)
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "split_wall", actor, before, list(changed_ids),
+        {
+            "wall_id": wall_id,
+            "new_wall_id": new_wall_id,
+            "split_node_id": split_node.id,
+            "split_node_reused": reused_split_node,
+            "requested_point": {"x": point.x, "y": point.y},
+            "projected_point": {"x": projected.x, "y": projected.y},
+            "split_offset_px": split_offset,
+            "original_length_px": original_length,
+            "original_start_node_id": original_start_node_id,
+            "reassigned_opening_ids": sorted(reassigned_opening_ids),
             "affected_room_ids": sorted(affected_room_ids),
         },
     ))

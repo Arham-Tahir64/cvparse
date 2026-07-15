@@ -39,6 +39,25 @@ def point_at_offset(
     return Coordinate(start.x + offset_px * ux, start.y + offset_px * uy)
 
 
+def project_point_to_segment(
+    point: Coordinate,
+    start: Coordinate,
+    end: Coordinate,
+) -> tuple[Coordinate, float, float]:
+    """Return clamped projection, longitudinal offset, and lateral distance."""
+    length = distance(start, end)
+    if length <= 1e-9:
+        return start, 0.0, distance(point, start)
+    ux = (end.x - start.x) / length
+    uy = (end.y - start.y) / length
+    offset = min(
+        length,
+        max(0.0, (point.x - start.x) * ux + (point.y - start.y) * uy),
+    )
+    projected = Coordinate(start.x + offset * ux, start.y + offset * uy)
+    return projected, offset, distance(point, projected)
+
+
 def transform_wall_local_point(
     point: Coordinate,
     old_start: Coordinate,

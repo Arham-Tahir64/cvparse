@@ -35,6 +35,7 @@ from vision.domain.commands import (
     set_approval_status,
     set_review_status,
     set_scale,
+    split_wall,
     undo_last_edit,
 )
 from vision.domain.geometry import distance, point_at_offset, polygon_area
@@ -519,6 +520,126 @@ def test_add_wall_rejects_duplicate_and_unsplit_crossing():
             raise AssertionError("invalid wall creation was accepted")
     assert model.revision == 1
     assert model.undo_revision_stack == []
+
+
+def test_split_wall_preserves_parent_id_reassigns_opening_and_keeps_quantities():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    wall = model.walls[1]
+    opening = next(item for item in model.openings if item.wall_id == wall.id)
+    window = next(item for item in model.windows if item.opening_id == opening.id)
+    model.rooms[0].boundary_wall_ids = [wall.id]
+    model.rooms[0].metadata.review_status = ReviewStatus.CONFIRMED
+    model.rooms[0].metadata.locked = True
+    before_quantities = calculate_quantities(model)
+
+    updated = split_wall(
+        model,
+        wall_id=wall.id,
+        point=Coordinate(218, 80),
+        projection_tolerance_px=5,
+        actor="wall-editor",
+    )
+
+    event = updated.edit_history[-1]
+    parent = next(item for item in updated.walls if item.id == wall.id)
+    child = next(
+        item for item in updated.walls if item.id == event.payload["new_wall_id"]
+    )
+    split_node = next(
+        item for item in updated.nodes if item.id == event.payload["split_node_id"]
+    )
+    moved_opening = next(item for item in updated.openings if item.id == opening.id)
+    moved_window = next(item for item in updated.windows if item.id == window.id)
+    after_quantities = calculate_quantities(updated)
+
+    assert event.action == "split_wall"
+    assert event.payload["projected_point"] == {"x": 220.0, "y": 80.0}
+    assert parent.id == wall.id
+    assert parent.end == Coordinate(220, 80)
+    assert parent.length_px == 60
+    assert child.start == Coordinate(220, 80)
+    assert child.end == Coordinate(220, 220)
+    assert child.length_px == 140
+    assert child.metadata.source.kind == ObjectSourceKind.MANUAL_CREATED
+    assert child.metadata.source.details["parent_wall_id"] == wall.id
+    assert split_node.point == Coordinate(220, 80)
+    assert set(split_node.connected_wall_ids) == {wall.id, child.id}
+    assert moved_opening.wall_id == child.id
+    assert moved_opening.start_offset_px == 15
+    assert moved_opening.end_offset_px == 45
+    assert moved_opening.center == opening.center
+    assert moved_opening.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert moved_window.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert updated.rooms[0].boundary_wall_ids == [wall.id, child.id]
+    assert updated.rooms[0].metadata.review_status == ReviewStatus.CONFIRMED
+    assert updated.rooms[0].metadata.locked is True
+    assert after_quantities.pixel_measurements == before_quantities.pixel_measurements
+    assert not any(
+        issue.code == "room.topology_stale" for issue in updated.validation_issues
+    )
+
+    undone = undo_last_edit(updated, model)
+    assert len(undone.walls) == len(model.walls)
+    restored_opening = next(item for item in undone.openings if item.id == opening.id)
+    assert restored_opening.wall_id == wall.id
+    redone = redo_last_edit(undone, updated)
+    assert any(item.id == child.id for item in redone.walls)
+
+
+def test_split_wall_rejects_opening_crossing_and_distant_click():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall = model.walls[0]
+
+    for point, tolerance, expected in (
+        (Coordinate(100, 20), None, "crosses opening"),
+        (Coordinate(150, 100), 10, "beyond tolerance"),
+        (Coordinate(20, 20), None, "inside both wall endpoints"),
+    ):
+        try:
+            split_wall(
+                model,
+                wall_id=wall.id,
+                point=point,
+                projection_tolerance_px=tolerance,
+            )
+        except DomainCommandError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("invalid wall split was accepted")
+    assert model.revision == 1
+
+
+def test_split_wall_enables_connected_t_junction_creation():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall = model.walls[0]
+    split = split_wall(
+        model, wall_id=wall.id, point=Coordinate(150, 20),
+    )
+    split_node_id = split.edit_history[-1].payload["split_node_id"]
+    before_length = calculate_quantities(split).pixel_measurements[
+        "wall_centerline_length_px"
+    ]
+
+    joined = add_wall(
+        split,
+        start=Coordinate(150, 20),
+        end=Coordinate(150, 120),
+        thickness_px=12,
+    )
+
+    split_node = next(node for node in joined.nodes if node.id == split_node_id)
+    added_wall_id = joined.edit_history[-1].payload["wall_id"]
+    assert len(split_node.connected_wall_ids) == 3
+    assert added_wall_id in split_node.connected_wall_ids
+    assert calculate_quantities(joined).pixel_measurements[
+        "wall_centerline_length_px"
+    ] == before_length + 100
+    assert any(
+        issue.code == "room.topology_stale" for issue in joined.validation_issues
+    )
 
 
 def test_delete_manual_wall_repairs_graph_and_is_undoable():
