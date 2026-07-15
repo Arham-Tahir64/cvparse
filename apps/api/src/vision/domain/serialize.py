@@ -10,6 +10,7 @@ from .models import (
     ConfidenceBreakdown,
     Coordinate,
     Door,
+    EditEvent,
     IssueSeverity,
     IssueStatus,
     Node,
@@ -165,13 +166,20 @@ def from_json_dict(data: dict[str, Any]) -> TakeoffModel:
         cost_impact=float(item["cost_impact"]), priority=float(item["priority"]),
         status=IssueStatus(item.get("status", IssueStatus.OPEN.value)),
     ) for item in data.get("validation_issues", [])]
+    history = [EditEvent(
+        id=item["id"], action=item["action"], actor=item["actor"],
+        revision_before=int(item["revision_before"]),
+        revision_after=int(item["revision_after"]),
+        affected_object_ids=list(item.get("affected_object_ids", [])),
+        payload=dict(item.get("payload", {})), timestamp=item["timestamp"],
+    ) for item in data.get("edit_history", [])]
     return TakeoffModel(
         id=data["id"], source=source, scale=scale, nodes=nodes, walls=walls,
         openings=openings, doors=doors, windows=windows, rooms=rooms,
-        validation_issues=issues, revision=int(data.get("revision", 1)),
+        validation_issues=issues, edit_history=history,
+        revision=int(data.get("revision", 1)),
         approval_status=ApprovalStatus(
             data.get("approval_status", ApprovalStatus.DRAFT.value)
         ),
         schema_version=data["schema_version"],
     )
-

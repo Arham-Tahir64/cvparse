@@ -207,6 +207,18 @@ class ValidationIssue:
 
 
 @dataclass(slots=True)
+class EditEvent:
+    id: str
+    action: str
+    actor: str
+    revision_before: int
+    revision_after: int
+    affected_object_ids: list[str]
+    payload: dict[str, Any]
+    timestamp: str
+
+
+@dataclass(slots=True)
 class TakeoffModel:
     id: str
     source: PlanSource
@@ -218,7 +230,7 @@ class TakeoffModel:
     windows: list[Window] = field(default_factory=list)
     rooms: list[Room] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    edit_history: list[EditEvent] = field(default_factory=list)
     revision: int = 1
     approval_status: ApprovalStatus = ApprovalStatus.DRAFT
     schema_version: str = MODEL_SCHEMA_VERSION
-

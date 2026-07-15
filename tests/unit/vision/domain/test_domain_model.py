@@ -18,7 +18,9 @@ from vision.cv.models import (
     Window as CVWindow,
 )
 from vision.domain.import_cv import import_cv_result
+from vision.domain.commands import set_review_status, set_scale
 from vision.domain.models import ObjectSourceKind, OpeningKind, ReviewStatus
+from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
 from vision.domain.serialize import from_json_dict, to_json_dict
 from vision.domain.validation import validate_model
 
@@ -137,7 +139,10 @@ def test_duplicate_opening_ranges_are_flagged_not_silently_merged():
 
 
 def test_model_json_round_trip_is_lossless():
-    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
 
     encoded = to_json_dict(model)
     json.dumps(encoded)
@@ -146,10 +151,66 @@ def test_model_json_round_trip_is_lossless():
     assert to_json_dict(decoded) == encoded
 
 
+def test_scale_command_recomputes_only_calibrated_measurements():
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+
+    updated = set_scale(original, pixels_per_unit=20, unit="ft", actor="reviewer")
+
+    assert original.revision == 1
+    assert original.walls[0].length is None
+    assert updated.revision == 2
+    assert updated.scale.review_status == ReviewStatus.CONFIRMED
+    assert updated.walls[0].length == updated.walls[0].length_px / 20
+    assert updated.openings[0].width == updated.openings[0].width_px / 20
+    assert updated.rooms[0].area == updated.rooms[0].area_px / 400
+    assert updated.rooms[0].perimeter == updated.rooms[0].perimeter_px / 20
+    assert updated.edit_history[-1].action == "set_scale"
+
+
+def test_review_command_locks_confirmed_object_and_preserves_original():
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall_id = original.walls[0].id
+
+    updated = set_review_status(
+        original, object_id=wall_id, status=ReviewStatus.CONFIRMED,
+    )
+
+    assert original.walls[0].metadata.review_status != ReviewStatus.CONFIRMED
+    assert updated.revision == 2
+    assert updated.walls[0].metadata.review_status == ReviewStatus.CONFIRMED
+    assert updated.walls[0].metadata.locked is True
+    assert updated.edit_history[-1].affected_object_ids == [wall_id]
+
+
+def test_json_repository_persists_and_rejects_stale_revision(tmp_path):
+    repository = JsonFileModelRepository(tmp_path)
+    original = import_cv_result(cv_result(), source_fingerprint="abc123")
+    repository.save(original)
+
+    loaded = repository.get(original.id)
+    assert to_json_dict(loaded) == to_json_dict(original)
+
+    updated = set_scale(loaded, pixels_per_unit=20, unit="ft")
+    repository.save(updated, expected_revision=1)
+    assert repository.get(original.id).revision == 2
+    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    stale = set_review_status(
+        original, object_id=original.walls[0].id,
+        status=ReviewStatus.CONFIRMED,
+    )
+    try:
+        repository.save(stale, expected_revision=1)
+    except RevisionConflictError:
+        pass
+    else:
+        raise AssertionError("stale write was not rejected")
+
+
 def test_legacy_schema_remains_unchanged():
     legacy = legacy_serialize.to_json_dict(cv_result())
 
     assert legacy["schema_version"] == "1.0.0"
     assert "scale" not in legacy
     assert "review_status" not in legacy["walls"][0]
-

@@ -5,8 +5,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.model_store import get_model_repository
 from vision.cv import ocr_engines
 from vision.cv.models import TextElement
+from vision.domain.repository import InMemoryModelRepository
 
 
 class FakeEngine:
@@ -17,7 +19,12 @@ class FakeEngine:
 @pytest.fixture()
 def client(monkeypatch):
     monkeypatch.setattr(ocr_engines, "get_engine", lambda *_: FakeEngine())
-    return TestClient(app)
+    repository = InMemoryModelRepository()
+    app.dependency_overrides[get_model_repository] = lambda: repository
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
 
 
 def plan_png() -> bytes:
@@ -60,6 +67,68 @@ def test_takeoff_route_can_include_editable_model(client):
     assert len(body["model"]["source"]["fingerprint"]) == 64
     assert body["model"]["validation_issues"][0]["code"] == "scale.unconfirmed"
     assert body["model"]["walls"]
+
+
+def test_persisted_model_scale_review_and_revision_workflow(client):
+    created_response = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    )
+    assert created_response.status_code == 200
+    created = created_response.json()["model"]
+    model_id = created["id"]
+    wall_id = created["walls"][0]["id"]
+    assert created["revision"] == 1
+
+    fetched = client.get(f"/api/takeoff/models/{model_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["model"] == created
+
+    scaled_response = client.put(
+        f"/api/takeoff/models/{model_id}/scale",
+        json={
+            "expected_revision": 1,
+            "pixels_per_unit": 20,
+            "unit": "ft",
+            "actor": "reviewer@example.test",
+        },
+    )
+    assert scaled_response.status_code == 200
+    scaled = scaled_response.json()["model"]
+    assert scaled["revision"] == 2
+    assert scaled["scale"]["review_status"] == "confirmed"
+    assert all(wall["length"] is not None for wall in scaled["walls"])
+    assert not any(
+        issue["code"] == "scale.unconfirmed"
+        for issue in scaled["validation_issues"]
+    )
+    assert scaled["edit_history"][-1]["action"] == "set_scale"
+
+    reviewed_response = client.put(
+        f"/api/takeoff/models/{model_id}/objects/{wall_id}/review",
+        json={"expected_revision": 2, "status": "confirmed"},
+    )
+    assert reviewed_response.status_code == 200
+    reviewed = reviewed_response.json()["model"]
+    reviewed_wall = next(wall for wall in reviewed["walls"] if wall["id"] == wall_id)
+    assert reviewed["revision"] == 3
+    assert reviewed_wall["metadata"]["review_status"] == "confirmed"
+    assert reviewed_wall["metadata"]["locked"] is True
+    assert reviewed["edit_history"][-1]["action"] == "set_review_status"
+
+    stale = client.put(
+        f"/api/takeoff/models/{model_id}/scale",
+        json={"expected_revision": 2, "pixels_per_unit": 21, "unit": "ft"},
+    )
+    assert stale.status_code == 409
+
+    duplicate_create = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    )
+    assert duplicate_create.status_code == 409
 
 
 def test_takeoff_route_unsupported_mime(client):
