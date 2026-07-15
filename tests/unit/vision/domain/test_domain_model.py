@@ -27,6 +27,7 @@ from vision.adapters.domain_annotation_adapter import (
 )
 from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
+    add_opening,
     add_wall,
     delete_wall,
     DomainCommandError,
@@ -37,6 +38,7 @@ from vision.domain.commands import (
     set_scale,
     split_wall,
     undo_last_edit,
+    update_opening_geometry,
 )
 from vision.domain.geometry import distance, point_at_offset, polygon_area
 from vision.domain.models import (
@@ -640,6 +642,157 @@ def test_split_wall_enables_connected_t_junction_creation():
     assert any(
         issue.code == "room.topology_stale" for issue in joined.validation_issues
     )
+
+
+def test_add_opening_projects_to_wall_creates_door_and_updates_quantities():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    wall = model.walls[0]
+    model.rooms[0].boundary_wall_ids = [wall.id]
+    before = calculate_quantities(model)
+
+    updated = add_opening(
+        model,
+        wall_id=wall.id,
+        center=Coordinate(180, 23),
+        width_px=20,
+        kind=OpeningKind.DOOR,
+        actor="opening-editor",
+    )
+
+    event = updated.edit_history[-1]
+    opening = next(
+        item for item in updated.openings
+        if item.id == event.payload["opening_id"]
+    )
+    door = next(item for item in updated.doors if item.opening_id == opening.id)
+    updated_wall = next(item for item in updated.walls if item.id == wall.id)
+    after = calculate_quantities(updated)
+    assert event.action == "add_opening"
+    assert opening.center == Coordinate(180, 20)
+    assert opening.start_offset_px == 150
+    assert opening.end_offset_px == 170
+    assert opening.width_px == 20
+    assert opening.width == 1
+    assert opening.kind == OpeningKind.DOOR
+    assert opening.metadata.source.kind == ObjectSourceKind.MANUAL_CREATED
+    assert door.metadata.source.kind == ObjectSourceKind.MANUAL_CREATED
+    assert door.hinge is None
+    assert opening.id in updated_wall.opening_ids
+    assert door.id in updated.rooms[0].door_ids
+    assert updated.rooms[0].metadata.review_status == ReviewStatus.NEEDS_REVIEW
+    assert after.counts["openings"] == before.counts["openings"] + 1
+    assert after.counts["doors"] == before.counts["doors"] + 1
+    assert after.pixel_measurements["opening_width_px"] == (
+        before.pixel_measurements["opening_width_px"] + 20
+    )
+    annotation = to_model_annotation_document(updated)
+    assert any(item["id"] == door.id for item in annotation["elements"])
+
+    undone = undo_last_edit(updated, model)
+    assert not any(item.id == opening.id for item in undone.openings)
+    assert not any(item.id == door.id for item in undone.doors)
+
+
+def test_add_opening_rejects_overlap_off_wall_and_out_of_bounds():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall = model.walls[0]
+
+    for center, width, tolerance, expected in (
+        (Coordinate(100, 20), 20, None, "overlaps existing opening"),
+        (Coordinate(180, 80), 20, 10, "beyond tolerance"),
+        (Coordinate(215, 20), 30, None, "fully within"),
+    ):
+        try:
+            add_opening(
+                model,
+                wall_id=wall.id,
+                center=center,
+                width_px=width,
+                projection_tolerance_px=tolerance,
+            )
+        except DomainCommandError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("invalid opening creation was accepted")
+    assert model.revision == 1
+
+
+def test_update_opening_geometry_moves_door_swing_resizes_and_is_undoable():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    opening = next(item for item in model.openings if item.kind == OpeningKind.DOOR)
+    door = next(item for item in model.doors if item.opening_id == opening.id)
+    before = calculate_quantities(model)
+
+    updated = update_opening_geometry(
+        model,
+        opening_id=opening.id,
+        center=Coordinate(150, 20),
+        width_px=30,
+        actor="opening-editor",
+    )
+
+    moved = next(item for item in updated.openings if item.id == opening.id)
+    moved_door = next(item for item in updated.doors if item.id == door.id)
+    after = calculate_quantities(updated)
+    assert updated.edit_history[-1].action == "update_opening_geometry"
+    assert moved.center == Coordinate(150, 20)
+    assert moved.start_offset_px == 115
+    assert moved.end_offset_px == 145
+    assert moved.width_px == 30
+    assert moved.width == 1.5
+    assert moved.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert moved_door.hinge == Coordinate(150, 20)
+    assert moved_door.swing_end == Coordinate(150, 50)
+    assert moved_door.swing_arc == [
+        Coordinate(
+            150 + (point.x - door.hinge.x) * 0.75,
+            20 + (point.y - door.hinge.y) * 0.75,
+        )
+        for point in door.swing_arc
+    ]
+    assert after.pixel_measurements["opening_width_px"] == (
+        before.pixel_measurements["opening_width_px"] - 10
+    )
+
+    undone = undo_last_edit(updated, model)
+    restored = next(item for item in undone.openings if item.id == opening.id)
+    restored_door = next(item for item in undone.doors if item.id == door.id)
+    assert restored.center == opening.center
+    assert restored.width_px == opening.width_px
+    assert restored_door.swing_arc == door.swing_arc
+
+
+def test_update_opening_geometry_rejects_noop_and_other_opening_overlap():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    opening = next(item for item in model.openings if item.kind == OpeningKind.DOOR)
+    with_extra = add_opening(
+        model,
+        wall_id=opening.wall_id,
+        center=Coordinate(180, 20),
+        width_px=20,
+    )
+
+    for source, center, width, expected in (
+        (model, opening.center, opening.width_px, "did not change"),
+        (with_extra, Coordinate(180, 20), 30, "overlaps existing opening"),
+    ):
+        try:
+            update_opening_geometry(
+                source,
+                opening_id=opening.id,
+                center=center,
+                width_px=width,
+            )
+        except DomainCommandError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("invalid opening geometry update was accepted")
 
 
 def test_delete_manual_wall_repairs_graph_and_is_undoable():

@@ -11,6 +11,7 @@ from vision.adapters.domain_annotation_adapter import (
 )
 from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
+    add_opening,
     add_wall,
     delete_wall,
     DomainCommandError,
@@ -21,8 +22,14 @@ from vision.domain.commands import (
     set_scale,
     split_wall,
     undo_last_edit,
+    update_opening_geometry,
 )
-from vision.domain.models import ApprovalStatus, Coordinate, ReviewStatus
+from vision.domain.models import (
+    ApprovalStatus,
+    Coordinate,
+    OpeningKind,
+    ReviewStatus,
+)
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.repository import (
     ModelNotFoundError,
@@ -84,6 +91,25 @@ class WallSplit(BaseModel):
     expected_revision: int = Field(ge=1)
     x: float
     y: float
+    projection_tolerance_px: float | None = Field(default=None, ge=0)
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class OpeningCreate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    x: float
+    y: float
+    width_px: float = Field(gt=0)
+    kind: OpeningKind = OpeningKind.UNKNOWN
+    projection_tolerance_px: float | None = Field(default=None, ge=0)
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class OpeningGeometryUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    x: float
+    y: float
+    width_px: float = Field(gt=0)
     projection_tolerance_px: float | None = Field(default=None, ge=0)
     actor: str = Field(default="user", min_length=1, max_length=128)
 
@@ -381,6 +407,55 @@ def split_model_wall(
             model,
             wall_id=wall_id,
             point=Coordinate(request.x, request.y),
+            projection_tolerance_px=request.projection_tolerance_px,
+            actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.post("/{model_id}/walls/{wall_id}/openings")
+def create_opening(
+    model_id: str,
+    wall_id: str,
+    request: OpeningCreate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = add_opening(
+            model,
+            wall_id=wall_id,
+            center=Coordinate(request.x, request.y),
+            width_px=request.width_px,
+            kind=request.kind,
+            projection_tolerance_px=request.projection_tolerance_px,
+            actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.put("/{model_id}/openings/{opening_id}/geometry")
+def revise_opening_geometry(
+    model_id: str,
+    opening_id: str,
+    request: OpeningGeometryUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = update_opening_geometry(
+            model,
+            opening_id=opening_id,
+            center=Coordinate(request.x, request.y),
+            width_px=request.width_px,
             projection_tolerance_px=request.projection_tolerance_px,
             actor=request.actor,
         )

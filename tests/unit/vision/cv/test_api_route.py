@@ -430,6 +430,92 @@ def test_persisted_wall_split_preserves_length_and_is_undoable(client):
     assert not any(item["id"] == child_id for item in undone["walls"])
 
 
+def test_persisted_opening_create_move_quantities_annotations_and_undo(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    wall_model = client.post(
+        f"/api/takeoff/models/{model_id}/walls",
+        json={
+            "expected_revision": 1,
+            "start_x": 10,
+            "start_y": 10,
+            "end_x": 100,
+            "end_y": 10,
+            "thickness_px": 8,
+            "snap_tolerance_px": 0,
+        },
+    ).json()["model"]
+    wall_id = wall_model["edit_history"][-1]["payload"]["wall_id"]
+
+    create_response = client.post(
+        f"/api/takeoff/models/{model_id}/walls/{wall_id}/openings",
+        json={
+            "expected_revision": 2,
+            "x": 50,
+            "y": 13,
+            "width_px": 20,
+            "kind": "door",
+            "projection_tolerance_px": 4,
+            "actor": "opening-editor",
+        },
+    )
+    assert create_response.status_code == 200
+    opened = create_response.json()["model"]
+    event = opened["edit_history"][-1]
+    opening_id = event["payload"]["opening_id"]
+    door_id = event["payload"]["logical_object_id"]
+    opening = next(item for item in opened["openings"] if item["id"] == opening_id)
+    assert opened["revision"] == 3
+    assert opening["center"] == {"x": 50.0, "y": 10.0}
+    assert opening["width_px"] == 20
+    assert any(item["id"] == door_id for item in opened["doors"])
+
+    move_response = client.put(
+        f"/api/takeoff/models/{model_id}/openings/{opening_id}/geometry",
+        json={
+            "expected_revision": 3,
+            "x": 70,
+            "y": 10,
+            "width_px": 30,
+            "actor": "opening-editor",
+        },
+    )
+    assert move_response.status_code == 200
+    moved_model = move_response.json()["model"]
+    moved = next(
+        item for item in moved_model["openings"] if item["id"] == opening_id
+    )
+    assert moved_model["revision"] == 4
+    assert moved["center"] == {"x": 70.0, "y": 10.0}
+    assert moved["start_offset_px"] == 45
+    assert moved["end_offset_px"] == 75
+    quantities = client.get(
+        f"/api/takeoff/models/{model_id}/quantities"
+    ).json()["quantities"]
+    assert quantities["model_revision"] == 4
+    assert opening_id in quantities["included_object_ids"]
+    annotations = client.get(
+        f"/api/takeoff/models/{model_id}/annotations"
+    ).json()["annotations"]
+    rendered = next(item for item in annotations["elements"] if item["id"] == door_id)
+    assert rendered["geometry"]["opening_center"] == {"x": 70.0, "y": 10.0}
+    assert rendered["geometry"]["width_px"] == 30
+
+    undo_response = client.post(
+        f"/api/takeoff/models/{model_id}/undo",
+        json={"expected_revision": 4},
+    )
+    assert undo_response.status_code == 200
+    undone = undo_response.json()["model"]
+    restored = next(item for item in undone["openings"] if item["id"] == opening_id)
+    assert restored["center"] == {"x": 50.0, "y": 10.0}
+    assert restored["width_px"] == 20
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

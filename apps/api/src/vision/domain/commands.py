@@ -23,15 +23,19 @@ from .models import (
     ApprovalStatus,
     ConfidenceBreakdown,
     Coordinate,
+    Door,
     EditEvent,
     Node,
     ObjectMetadata,
     ObjectSourceKind,
+    Opening,
+    OpeningKind,
     ReviewStatus,
     ScaleMethod,
     SourceEvidence,
     TakeoffModel,
     Wall,
+    Window,
 )
 from .validation import validate_model
 from .quantities import QuantityBasis, calculate_quantities
@@ -283,6 +287,61 @@ def _wall_by_id(model: TakeoffModel, wall_id: str):
         return next(wall for wall in model.walls if wall.id == wall_id)
     except StopIteration as exc:
         raise DomainCommandError(f"wall {wall_id} was not found") from exc
+
+
+def _opening_by_id(model: TakeoffModel, opening_id: str) -> Opening:
+    try:
+        return next(item for item in model.openings if item.id == opening_id)
+    except StopIteration as exc:
+        raise DomainCommandError(f"opening {opening_id} was not found") from exc
+
+
+def _constrained_opening_range(
+    model: TakeoffModel,
+    wall: Wall,
+    *,
+    center: Coordinate,
+    width_px: float,
+    projection_tolerance_px: float | None,
+    exclude_opening_id: str | None = None,
+) -> tuple[Coordinate, float, float, float]:
+    if not _within_image(model, center):
+        raise DomainCommandError(
+            "opening center must be finite and within the plan image"
+        )
+    if not math.isfinite(width_px) or width_px <= 0:
+        raise DomainCommandError("opening width must be a positive finite number")
+    tolerance = (
+        max(2.0, wall.thickness_px)
+        if projection_tolerance_px is None else projection_tolerance_px
+    )
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise DomainCommandError(
+            "projection tolerance must be a non-negative finite number"
+        )
+    projected, center_offset, lateral_distance = project_point_to_segment(
+        center, wall.start, wall.end,
+    )
+    if lateral_distance > tolerance:
+        raise DomainCommandError(
+            f"opening center is {lateral_distance:.3f} px from the wall centerline, "
+            f"beyond tolerance {tolerance:.3f} px"
+        )
+    start_offset = center_offset - width_px / 2.0
+    end_offset = center_offset + width_px / 2.0
+    if start_offset < -1e-6 or end_offset > wall.length_px + 1e-6:
+        raise DomainCommandError("opening must remain fully within its host wall")
+    for other in model.openings:
+        if other.wall_id != wall.id or other.id == exclude_opening_id:
+            continue
+        overlap = min(end_offset, other.end_offset_px) - max(
+            start_offset, other.start_offset_px
+        )
+        if overlap > 1e-6:
+            raise DomainCommandError(
+                f"opening overlaps existing opening {other.id}"
+            )
+    return projected, max(0.0, start_offset), min(wall.length_px, end_offset), tolerance
 
 
 def move_wall_endpoint(
@@ -793,6 +852,216 @@ def split_wall(
             "original_start_node_id": original_start_node_id,
             "reassigned_opening_ids": sorted(reassigned_opening_ids),
             "affected_room_ids": sorted(affected_room_ids),
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def add_opening(
+    model: TakeoffModel,
+    *,
+    wall_id: str,
+    center: Coordinate,
+    width_px: float,
+    kind: OpeningKind = OpeningKind.UNKNOWN,
+    projection_tolerance_px: float | None = None,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Create one logical wall-hosted opening from a constrained plan click."""
+    _ensure_editable(model)
+    wall = _wall_by_id(model, wall_id)
+    projected, start_offset, end_offset, tolerance = _constrained_opening_range(
+        model,
+        wall,
+        center=center,
+        width_px=width_px,
+        projection_tolerance_px=projection_tolerance_px,
+    )
+
+    updated = _prepare_edit(model)
+    wall = _wall_by_id(updated, wall_id)
+    opening_id = f"opening_manual_{uuid.uuid4().hex}"
+    opening = Opening(
+        id=opening_id,
+        wall_id=wall_id,
+        kind=kind,
+        start_offset_px=start_offset,
+        end_offset_px=end_offset,
+        center=projected,
+        width_px=float(width_px),
+        width=(
+            width_px / updated.scale.pixels_per_unit
+            if updated.scale.pixels_per_unit else None
+        ),
+        orientation=wall.orientation,
+        metadata=_manual_created_metadata("add_opening"),
+    )
+    updated.openings.append(opening)
+    wall.opening_ids.append(opening_id)
+    wall.opening_ids = sorted(set(wall.opening_ids))
+    _mark_manual(wall.metadata)
+    changed_ids: set[str] = {wall_id, opening_id}
+    logical_id: str | None = None
+    if kind == OpeningKind.DOOR:
+        logical = Door(
+            id=f"door_manual_{uuid.uuid4().hex}",
+            opening_id=opening_id,
+            subtype="unknown",
+            swing_direction=None,
+            hinge_side=None,
+            hinge=None,
+            swing_end=None,
+            swing_arc=[],
+            metadata=_manual_created_metadata("add_opening"),
+        )
+        updated.doors.append(logical)
+        logical_id = logical.id
+    elif kind == OpeningKind.WINDOW:
+        logical = Window(
+            id=f"window_manual_{uuid.uuid4().hex}",
+            opening_id=opening_id,
+            subtype="unknown",
+            sill_height=None,
+            metadata=_manual_created_metadata("add_opening"),
+        )
+        updated.windows.append(logical)
+        logical_id = logical.id
+    if logical_id is not None:
+        changed_ids.add(logical_id)
+        for room in updated.rooms:
+            if wall_id not in room.boundary_wall_ids:
+                continue
+            target = room.door_ids if kind == OpeningKind.DOOR else room.window_ids
+            target.append(logical_id)
+            target[:] = sorted(set(target))
+            _mark_manual(room.metadata)
+            changed_ids.add(room.id)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "add_opening", actor, before, list(changed_ids),
+        {
+            "wall_id": wall_id,
+            "opening_id": opening_id,
+            "logical_object_id": logical_id,
+            "kind": kind.value,
+            "projected_center": {"x": projected.x, "y": projected.y},
+            "start_offset_px": start_offset,
+            "end_offset_px": end_offset,
+            "projection_tolerance_px": tolerance,
+        },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def update_opening_geometry(
+    model: TakeoffModel,
+    *,
+    opening_id: str,
+    center: Coordinate,
+    width_px: float,
+    projection_tolerance_px: float | None = None,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Move and resize an opening along its current host wall."""
+    _ensure_editable(model)
+    selected = _opening_by_id(model, opening_id)
+    wall = _wall_by_id(model, selected.wall_id)
+    projected, start_offset, end_offset, tolerance = _constrained_opening_range(
+        model,
+        wall,
+        center=center,
+        width_px=width_px,
+        projection_tolerance_px=projection_tolerance_px,
+        exclude_opening_id=opening_id,
+    )
+    if (
+        distance(selected.center, projected) <= 1e-9
+        and abs(selected.width_px - width_px) <= 1e-9
+    ):
+        raise DomainCommandError("opening geometry did not change")
+
+    updated = _prepare_edit(model)
+    opening = _opening_by_id(updated, opening_id)
+    wall = _wall_by_id(updated, opening.wall_id)
+    previous = {
+        "center": {"x": opening.center.x, "y": opening.center.y},
+        "width_px": opening.width_px,
+        "start_offset_px": opening.start_offset_px,
+        "end_offset_px": opening.end_offset_px,
+    }
+    dx = projected.x - opening.center.x
+    dy = projected.y - opening.center.y
+    width_ratio = width_px / opening.width_px
+    opening.center = projected
+    opening.start_offset_px = start_offset
+    opening.end_offset_px = end_offset
+    opening.width_px = float(width_px)
+    opening.width = (
+        width_px / updated.scale.pixels_per_unit
+        if updated.scale.pixels_per_unit else None
+    )
+    opening.orientation = wall.orientation
+    _mark_manual(opening.metadata)
+    _mark_manual(wall.metadata)
+    changed_ids: set[str] = {opening_id, wall.id}
+    for door in updated.doors:
+        if door.opening_id != opening_id:
+            continue
+        old_hinge = door.hinge
+        if door.hinge is not None:
+            door.hinge = Coordinate(door.hinge.x + dx, door.hinge.y + dy)
+        if door.swing_end is not None:
+            if old_hinge is not None and door.hinge is not None:
+                door.swing_end = Coordinate(
+                    door.hinge.x + (door.swing_end.x - old_hinge.x) * width_ratio,
+                    door.hinge.y + (door.swing_end.y - old_hinge.y) * width_ratio,
+                )
+            else:
+                door.swing_end = Coordinate(
+                    door.swing_end.x + dx, door.swing_end.y + dy,
+                )
+        if old_hinge is not None and door.hinge is not None:
+            door.swing_arc = [
+                Coordinate(
+                    door.hinge.x + (point.x - old_hinge.x) * width_ratio,
+                    door.hinge.y + (point.y - old_hinge.y) * width_ratio,
+                )
+                for point in door.swing_arc
+            ]
+        else:
+            door.swing_arc = [
+                Coordinate(point.x + dx, point.y + dy) for point in door.swing_arc
+            ]
+        _mark_manual(door.metadata)
+        changed_ids.add(door.id)
+    for window in updated.windows:
+        if window.opening_id == opening_id:
+            _mark_manual(window.metadata)
+            changed_ids.add(window.id)
+    for room in updated.rooms:
+        if wall.id in room.boundary_wall_ids:
+            _mark_manual(room.metadata)
+            changed_ids.add(room.id)
+
+    before = updated.revision
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "update_opening_geometry", actor, before, list(changed_ids),
+        {
+            "opening_id": opening_id,
+            "wall_id": wall.id,
+            "before": previous,
+            "after": {
+                "center": {"x": projected.x, "y": projected.y},
+                "width_px": width_px,
+                "start_offset_px": start_offset,
+                "end_offset_px": end_offset,
+            },
+            "projection_tolerance_px": tolerance,
         },
     ))
     updated.validation_issues = validate_model(updated)
