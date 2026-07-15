@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from vision.cv.models import CVTakeoffResult, Point as CVPoint
 
+from .geometry import polygon_perimeter, wall_polygon
 from .models import (
     ConfidenceBreakdown,
     Coordinate,
@@ -110,19 +111,6 @@ def _source_fingerprint(
     return hashlib.sha256(fallback.encode("utf-8")).hexdigest()
 
 
-def _wall_polygon(start: Coordinate, end: Coordinate, thickness: float) -> list[Coordinate]:
-    dx, dy = end.x - start.x, end.y - start.y
-    length = max(1e-9, math.hypot(dx, dy))
-    nx, ny = -dy / length, dx / length
-    half = max(0.0, thickness) / 2.0
-    return [
-        Coordinate(start.x + nx * half, start.y + ny * half),
-        Coordinate(end.x + nx * half, end.y + ny * half),
-        Coordinate(end.x - nx * half, end.y - ny * half),
-        Coordinate(start.x - nx * half, start.y - ny * half),
-    ]
-
-
 def _distance_to_wall(point: Coordinate, wall: Wall) -> float:
     dx, dy = wall.end.x - wall.start.x, wall.end.y - wall.start.y
     denominator = dx * dx + dy * dy
@@ -138,16 +126,6 @@ def _offset_on_wall(point: Coordinate, wall: Wall) -> float:
     dx, dy = wall.end.x - wall.start.x, wall.end.y - wall.start.y
     length = max(1e-9, wall.length_px)
     return ((point.x - wall.start.x) * dx + (point.y - wall.start.y) * dy) / length
-
-
-def _room_perimeter(polygon: list[Coordinate]) -> float:
-    if len(polygon) < 2:
-        return 0.0
-    points = polygon + [polygon[0]]
-    return sum(
-        math.hypot(second.x - first.x, second.y - first.y)
-        for first, second in zip(points, points[1:])
-    )
 
 
 def import_cv_result(
@@ -211,7 +189,7 @@ def import_cv_result(
         wall = Wall(
             id=wall_id, start_node_id=start_node.id, end_node_id=end_node.id,
             start=start, end=end,
-            polygon=_wall_polygon(start, end, thickness),
+            polygon=wall_polygon(start, end, thickness),
             thickness_px=thickness, wall_type=candidate.wall_type,
             orientation=candidate.orientation, connected_wall_ids=[], opening_ids=[],
             length_px=float(candidate.centerline.length), length=candidate.length_ft,
@@ -381,7 +359,7 @@ def import_cv_result(
         rooms.append(Room(
             id=_stable_id("room", model_id, signature, occurrence),
             polygon=polygon, label=candidate.label, area_px=float(candidate.area),
-            area=None, perimeter_px=_room_perimeter(polygon), perimeter=None,
+            area=None, perimeter_px=polygon_perimeter(polygon), perimeter=None,
             boundary_wall_ids=[], door_ids=[], window_ids=[],
             neighboring_room_ids=[],
             metadata=_metadata(

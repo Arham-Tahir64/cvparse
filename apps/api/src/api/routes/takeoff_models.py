@@ -7,10 +7,11 @@ from pydantic import BaseModel, Field
 from api.model_store import get_model_repository
 from vision.domain.commands import (
     DomainCommandError,
+    move_wall_endpoint,
     set_review_status,
     set_scale,
 )
-from vision.domain.models import ReviewStatus
+from vision.domain.models import Coordinate, ReviewStatus
 from vision.domain.repository import (
     ModelNotFoundError,
     ModelRepository,
@@ -33,6 +34,13 @@ class ReviewUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     status: ReviewStatus
     locked: bool | None = None
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class WallEndpointUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    x: float
+    y: float
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
@@ -100,6 +108,27 @@ def update_review_status(
         updated = set_review_status(
             model, object_id=object_id, status=request.status,
             locked=request.locked, actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
+
+
+@router.put("/{model_id}/walls/{wall_id}/endpoints/{endpoint}")
+def update_wall_endpoint(
+    model_id: str,
+    wall_id: str,
+    endpoint: str,
+    request: WallEndpointUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = move_wall_endpoint(
+            model, wall_id=wall_id, endpoint=endpoint,
+            point=Coordinate(request.x, request.y), actor=request.actor,
         )
     except DomainCommandError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

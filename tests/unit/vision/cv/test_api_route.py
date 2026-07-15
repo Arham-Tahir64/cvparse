@@ -131,6 +131,40 @@ def test_persisted_model_scale_review_and_revision_workflow(client):
     assert duplicate_create.status_code == 409
 
 
+def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
+    created_response = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    )
+    created = created_response.json()["model"]
+    shared = next(node for node in created["nodes"] if len(node["connected_wall_ids"]) > 1)
+    wall = next(
+        wall for wall in created["walls"]
+        if wall["start_node_id"] == shared["id"] or wall["end_node_id"] == shared["id"]
+    )
+    endpoint = "start" if wall["start_node_id"] == shared["id"] else "end"
+    response = client.put(
+        f"/api/takeoff/models/{created['id']}/walls/{wall['id']}/endpoints/{endpoint}",
+        json={
+            "expected_revision": 1,
+            "x": shared["point"]["x"] + 2,
+            "y": shared["point"]["y"] + 2,
+            "actor": "reviewer@example.test",
+        },
+    )
+
+    assert response.status_code == 200
+    updated = response.json()["model"]
+    assert updated["revision"] == 2
+    moved = next(node for node in updated["nodes"] if node["id"] == shared["id"])
+    assert moved["point"] == {
+        "x": shared["point"]["x"] + 2,
+        "y": shared["point"]["y"] + 2,
+    }
+    assert updated["edit_history"][-1]["action"] == "move_wall_endpoint"
+
+
 def test_takeoff_route_unsupported_mime(client):
     response = client.post(
         "/api/cv/takeoff",

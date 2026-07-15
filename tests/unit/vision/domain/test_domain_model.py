@@ -18,8 +18,14 @@ from vision.cv.models import (
     Window as CVWindow,
 )
 from vision.domain.import_cv import import_cv_result
-from vision.domain.commands import set_review_status, set_scale
-from vision.domain.models import ObjectSourceKind, OpeningKind, ReviewStatus
+from vision.domain.commands import (
+    DomainCommandError,
+    move_wall_endpoint,
+    set_review_status,
+    set_scale,
+)
+from vision.domain.geometry import distance, point_at_offset, polygon_area
+from vision.domain.models import Coordinate, ObjectSourceKind, OpeningKind, ReviewStatus
 from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
 from vision.domain.serialize import from_json_dict, to_json_dict
 from vision.domain.validation import validate_model
@@ -206,6 +212,116 @@ def test_json_repository_persists_and_rejects_stale_revision(tmp_path):
         pass
     else:
         raise AssertionError("stale write was not rejected")
+
+
+def test_move_shared_wall_endpoint_recomputes_only_graph_dependents():
+    original = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    shared = next(node for node in original.nodes if len(node.connected_wall_ids) == 2)
+    selected = next(wall for wall in original.walls if wall.end_node_id == shared.id)
+    unchanged_node = next(node for node in original.nodes if node.id != shared.id)
+    old_unchanged_point = unchanged_node.point
+
+    updated = move_wall_endpoint(
+        original, wall_id=selected.id, endpoint="end",
+        point=Coordinate(240, 40), actor="reviewer",
+    )
+
+    moved_node = next(node for node in updated.nodes if node.id == shared.id)
+    assert original.revision == 2
+    assert original.nodes != updated.nodes
+    assert moved_node.point == Coordinate(240, 40)
+    assert next(node for node in updated.nodes if node.id == unchanged_node.id).point == old_unchanged_point
+    affected_walls = [wall for wall in updated.walls if wall.id in shared.connected_wall_ids]
+    assert len(affected_walls) == 2
+    assert all(
+        wall.start == moved_node.point or wall.end == moved_node.point
+        for wall in affected_walls
+    )
+    assert all(wall.length == wall.length_px / 20 for wall in affected_walls)
+    assert all(len(wall.polygon) == 4 for wall in affected_walls)
+    assert all(
+        wall.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+        and wall.metadata.review_status == ReviewStatus.NEEDS_REVIEW
+        for wall in affected_walls
+    )
+    assert updated.revision == 3
+    assert updated.edit_history[-1].action == "move_wall_endpoint"
+    assert len(updated.edit_history[-1].affected_object_ids) == 8
+    assert unchanged_node.id not in updated.edit_history[-1].affected_object_ids
+
+
+def test_move_wall_endpoint_keeps_openings_and_symbols_attached():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    shared = next(node for node in model.nodes if len(node.connected_wall_ids) == 2)
+    selected = next(wall for wall in model.walls if wall.end_node_id == shared.id)
+    old_door_hinge = model.doors[0].hinge
+
+    updated = move_wall_endpoint(
+        model, wall_id=selected.id, endpoint="end", point=Coordinate(240, 40),
+    )
+
+    for wall in updated.walls:
+        for opening_id in wall.opening_ids:
+            opening = next(item for item in updated.openings if item.id == opening_id)
+            expected = point_at_offset(
+                wall.start, wall.end,
+                (opening.start_offset_px + opening.end_offset_px) / 2,
+            )
+            assert distance(opening.center, expected) < 1e-6
+            assert opening.orientation == wall.orientation
+            assert opening.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert updated.doors[0].hinge != old_door_hinge
+    assert updated.doors[0].metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+    assert updated.windows[0].metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+
+
+def test_move_wall_endpoint_updates_room_corner_area_and_perimeter():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    shared = next(node for node in model.nodes if len(node.connected_wall_ids) == 2)
+    selected = next(wall for wall in model.walls if wall.end_node_id == shared.id)
+
+    updated = move_wall_endpoint(
+        model, wall_id=selected.id, endpoint="end", point=Coordinate(240, 40),
+    )
+
+    room = updated.rooms[0]
+    assert Coordinate(240, 40) in room.polygon
+    assert Coordinate(220, 20) not in room.polygon
+    assert room.area_px == polygon_area(room.polygon)
+    assert room.area == room.area_px / 400
+    assert room.perimeter == room.perimeter_px / 20
+    assert room.metadata.source.kind == ObjectSourceKind.MANUAL_ADJUSTED
+
+
+def test_move_wall_endpoint_rejects_geometry_that_orphans_opening():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    wall = model.walls[0]
+
+    try:
+        move_wall_endpoint(
+            model, wall_id=wall.id, endpoint="end", point=Coordinate(90, 20),
+        )
+    except DomainCommandError as exc:
+        assert "opening beyond wall" in str(exc)
+    else:
+        raise AssertionError("invalid shortening was accepted")
+    assert wall.end == Coordinate(220, 20)
+
+
+def test_validation_flags_wall_endpoint_that_disagrees_with_shared_node():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+    model.walls[0].end = Coordinate(219, 19)
+
+    issues = validate_model(model)
+
+    mismatch = next(issue for issue in issues if issue.code == "wall.node_geometry_mismatch")
+    assert model.walls[0].id in mismatch.affected_object_ids
 
 
 def test_legacy_schema_remains_unchanged():

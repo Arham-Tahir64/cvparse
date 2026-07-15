@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 
 from .models import (
     IssueSeverity,
@@ -66,6 +67,41 @@ def validate_model(model: TakeoffModel) -> list[ValidationIssue]:
                 model, "wall.invalid_geometry", IssueSeverity.ERROR,
                 "Wall length and thickness must be positive.", [wall.id],
                 1.0, 1.0, 0.8,
+            ))
+        start_node = nodes.get(wall.start_node_id)
+        end_node = nodes.get(wall.end_node_id)
+        if (
+            start_node is not None
+            and math.hypot(
+                wall.start.x - start_node.point.x,
+                wall.start.y - start_node.point.y,
+            ) > 1e-3
+        ) or (
+            end_node is not None
+            and math.hypot(
+                wall.end.x - end_node.point.x,
+                wall.end.y - end_node.point.y,
+            ) > 1e-3
+        ):
+            issues.append(_issue(
+                model, "wall.node_geometry_mismatch", IssueSeverity.ERROR,
+                "Wall endpoint coordinates do not match their graph nodes.",
+                [wall.id, wall.start_node_id, wall.end_node_id],
+                1.0, 1.0, 0.8,
+            ))
+
+    for node in model.nodes:
+        inconsistent = [
+            wall_id for wall_id in node.connected_wall_ids
+            if wall_id not in walls or node.id not in {
+                walls[wall_id].start_node_id, walls[wall_id].end_node_id,
+            }
+        ]
+        if inconsistent:
+            issues.append(_issue(
+                model, "node.connectivity_mismatch", IssueSeverity.ERROR,
+                "Node connectivity does not match wall endpoint references.",
+                [node.id, *inconsistent], 1.0, 1.0, 0.8,
             ))
 
     ranges_by_wall: dict[str, list] = {}
@@ -147,4 +183,3 @@ def validate_model(model: TakeoffModel) -> list[ValidationIssue]:
             ))
 
     return sorted(issues, key=lambda item: (-item.priority, item.code, item.id))
-
