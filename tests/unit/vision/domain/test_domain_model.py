@@ -44,6 +44,11 @@ from vision.domain.commands import (
     update_opening_geometry,
 )
 from vision.domain.geometry import distance, point_at_offset, polygon_area
+from vision.domain.costs import (
+    EstimateAssumptions,
+    MaterialEstimateError,
+    calculate_material_estimate,
+)
 from vision.domain.models import (
     ApprovalStatus,
     Coordinate,
@@ -1206,6 +1211,115 @@ def test_verified_quantities_exclude_door_without_confirmed_opening():
     assert door.id in summary.excluded_object_ids
     assert summary.complete is False
     assert any("dependencies" in warning for warning in summary.warnings)
+
+
+def _priced_assumptions(**overrides):
+    values = {
+        "wall_height": 8,
+        "door_height": 7,
+        "window_height": 4,
+        "stud_spacing": 2,
+        "waste_factors": {"flooring": 0.1},
+        "unit_costs": {
+            "drywall": 1,
+            "paint": 0.5,
+            "insulation": 0.75,
+            "framing_lumber": 2,
+            "flooring": 3,
+            "ceiling": 1,
+            "baseboard": 2,
+            "doors": 200,
+            "windows": 300,
+            "glazing": 10,
+            "door_trim": 1,
+            "window_trim": 1,
+        },
+    }
+    values.update(overrides)
+    return EstimateAssumptions(**values)
+
+
+def test_material_estimate_applies_opening_deductions_waste_and_rates():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    for collection in (
+        model.walls, model.openings, model.rooms, model.doors, model.windows,
+    ):
+        for item in collection:
+            item.metadata.review_status = ReviewStatus.CONFIRMED
+    model.rooms[0].door_ids = [model.doors[0].id]
+    model.validation_issues = validate_model(model)
+
+    estimate = calculate_material_estimate(
+        model, _priced_assumptions(), QuantityBasis.VERIFIED,
+    )
+    lines = {line.code: line for line in estimate.line_items}
+
+    assert lines["drywall"].quantity == 280
+    assert lines["insulation"].quantity == 140
+    assert lines["framing_lumber"].quantity == 188
+    assert lines["flooring"].quantity == 100
+    assert lines["flooring"].purchase_quantity == 110
+    assert lines["flooring"].extended_cost == 330
+    assert lines["baseboard"].quantity == 38
+    assert lines["glazing"].quantity == 6
+    assert lines["door_trim"].quantity == 32
+    assert lines["window_trim"].quantity == 22
+    assert estimate.priced_subtotal == 2021
+    assert estimate.geometry_complete is True
+    assert estimate.cost_complete is True
+    assert estimate.authoritative is True
+    assert set(lines["drywall"].source_object_ids).issuperset(
+        opening.id for opening in model.openings
+    )
+
+    missing_relation = copy.deepcopy(model)
+    missing_relation.rooms[0].door_ids = []
+    incomplete = calculate_material_estimate(
+        missing_relation, _priced_assumptions(), QuantityBasis.VERIFIED,
+    )
+    assert incomplete.geometry_complete is False
+    assert incomplete.authoritative is False
+    assert any("Door-room associations are missing" in item for item in incomplete.warnings)
+
+
+def test_material_estimate_tracks_geometry_revision_and_unscaled_limit():
+    unscaled = import_cv_result(cv_result(), source_fingerprint="abc123")
+    unavailable = calculate_material_estimate(unscaled, _priced_assumptions())
+    assert all(line.quantity is None for line in unavailable.line_items)
+    assert unavailable.priced_subtotal == 0
+    assert unavailable.cost_complete is False
+
+    model = set_scale(unscaled, pixels_per_unit=20, unit="ft")
+    before = calculate_material_estimate(model, _priced_assumptions())
+    door_opening = next(
+        opening for opening in model.openings if opening.kind == OpeningKind.DOOR
+    )
+    edited = update_opening_geometry(
+        model,
+        opening_id=door_opening.id,
+        center=door_opening.center,
+        width_px=60,
+    )
+    after = calculate_material_estimate(edited, _priced_assumptions())
+    before_lines = {line.code: line for line in before.line_items}
+    after_lines = {line.code: line for line in after.line_items}
+
+    assert after.model_revision == edited.revision == model.revision + 1
+    assert after_lines["drywall"].quantity == before_lines["drywall"].quantity - 14
+    assert after_lines["baseboard"].quantity == before_lines["baseboard"].quantity - 1
+    assert after_lines["ceiling"].quantity == before_lines["ceiling"].quantity
+
+    try:
+        calculate_material_estimate(
+            model, _priced_assumptions(unit_costs={"made_up": 1}),
+        )
+    except MaterialEstimateError as exc:
+        assert "unknown material codes" in str(exc)
+    else:
+        raise AssertionError("unknown material code was accepted")
 
 
 def test_file_source_repository_is_idempotent_atomic_and_detects_tampering(tmp_path):

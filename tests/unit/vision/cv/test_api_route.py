@@ -308,6 +308,71 @@ def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     reviewed_pdf.close()
 
 
+def test_persisted_material_estimate_is_revision_bound_and_costed(client):
+    created = client.post(
+        "/api/cv/takeoff",
+        files={"file": ("plan.png", plan_png(), "image/png")},
+        data={"persist_model": "true"},
+    ).json()["model"]
+    model_id = created["id"]
+    scaled = client.put(
+        f"/api/takeoff/models/{model_id}/scale",
+        json={"expected_revision": 1, "pixels_per_unit": 20, "unit": "ft"},
+    ).json()["model"]
+    rates = {
+        code: (3 if code == "flooring" else 1)
+        for code in (
+            "drywall", "paint", "insulation", "framing_lumber",
+            "flooring", "ceiling", "baseboard", "doors", "windows",
+            "glazing", "door_trim", "window_trim",
+        )
+    }
+    payload = {
+        "expected_revision": 2,
+        "basis": "provisional",
+        "wall_height": 8,
+        "door_height": 7,
+        "window_height": 4,
+        "waste_factors": {"flooring": 0.1},
+        "unit_costs": rates,
+        "currency": "cad",
+    }
+
+    response = client.post(
+        f"/api/takeoff/models/{model_id}/estimates/materials", json=payload,
+    )
+
+    assert response.status_code == 200
+    estimate = response.json()["estimate"]
+    lines = {line["code"]: line for line in estimate["line_items"]}
+    assert estimate["model_revision"] == scaled["revision"] == 2
+    assert estimate["currency"] == "CAD"
+    assert estimate["cost_complete"] is True
+    assert estimate["geometry_complete"] is False
+    assert estimate["authoritative"] is False
+    assert lines["flooring"]["purchase_quantity"] == pytest.approx(
+        lines["flooring"]["quantity"] * 1.1
+    )
+    assert lines["flooring"]["extended_cost"] == round(
+        lines["flooring"]["purchase_quantity"] * 3, 2
+    )
+    assert set(lines["flooring"]["source_object_ids"]).issubset(
+        set(estimate["included_object_ids"])
+    )
+
+    stale = client.post(
+        f"/api/takeoff/models/{model_id}/estimates/materials",
+        json={**payload, "expected_revision": 1},
+    )
+    assert stale.status_code == 409
+    invalid = client.post(
+        f"/api/takeoff/models/{model_id}/estimates/materials",
+        json={**payload, "unit_costs": {"made_up": 1}},
+    )
+    assert invalid.status_code == 422
+    assert "unknown material codes" in invalid.json()["detail"]
+
+
 def test_persisted_wall_create_delete_quantities_and_undo(client):
     created = client.post(
         "/api/cv/takeoff",

@@ -33,6 +33,11 @@ from vision.domain.models import (
     OpeningKind,
     ReviewStatus,
 )
+from vision.domain.costs import (
+    EstimateAssumptions,
+    MaterialEstimateError,
+    calculate_material_estimate,
+)
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.repository import (
     ModelNotFoundError,
@@ -138,6 +143,23 @@ class ApprovalUpdate(BaseModel):
 class HistoryUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class MaterialEstimateRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    basis: QuantityBasis = QuantityBasis.PROVISIONAL
+    wall_height: float = Field(gt=0)
+    door_height: float = Field(gt=0)
+    window_height: float = Field(gt=0)
+    wall_finish_sides: float = Field(default=2.0, gt=0)
+    insulation_sides: float = Field(default=1.0, gt=0)
+    stud_spacing: float = Field(default=1.333333, gt=0)
+    plates_per_wall: float = Field(default=3.0, ge=0)
+    extra_studs_per_opening: int = Field(default=2, ge=0)
+    opening_trim_sides: float = Field(default=2.0, ge=0)
+    waste_factors: dict[str, float] = Field(default_factory=dict)
+    unit_costs: dict[str, float] = Field(default_factory=dict)
+    currency: str = Field(default="USD", min_length=1, max_length=8)
 
 
 def _get(repository: ModelRepository, model_id: str):
@@ -271,6 +293,38 @@ def get_model_quantities(
 ):
     model = _get(repository, model_id)
     return {"quantities": calculate_quantities(model, basis).to_dict()}
+
+
+@router.post("/{model_id}/estimates/materials")
+def get_model_material_estimate(
+    model_id: str,
+    request: MaterialEstimateRequest,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        estimate = calculate_material_estimate(
+            model,
+            EstimateAssumptions(
+                wall_height=request.wall_height,
+                door_height=request.door_height,
+                window_height=request.window_height,
+                wall_finish_sides=request.wall_finish_sides,
+                insulation_sides=request.insulation_sides,
+                stud_spacing=request.stud_spacing,
+                plates_per_wall=request.plates_per_wall,
+                extra_studs_per_opening=request.extra_studs_per_opening,
+                opening_trim_sides=request.opening_trim_sides,
+                waste_factors=request.waste_factors,
+                unit_costs=request.unit_costs,
+                currency=request.currency,
+            ),
+            request.basis,
+        )
+    except MaterialEstimateError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"estimate": estimate.to_dict()}
 
 
 @router.get("/{model_id}/reviewed.pdf")
