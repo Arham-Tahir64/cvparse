@@ -134,6 +134,13 @@ def test_persisted_model_scale_review_and_revision_workflow(client):
     )
     assert duplicate_create.status_code == 409
 
+    incomplete_approval = client.put(
+        f"/api/takeoff/models/{model_id}/approval",
+        json={"expected_revision": 3, "status": "approved"},
+    )
+    assert incomplete_approval.status_code == 422
+    assert "cannot be approved" in incomplete_approval.json()["detail"]
+
 
 def test_persisted_wall_endpoint_edit_updates_shared_geometry(client):
     created_response = client.post(

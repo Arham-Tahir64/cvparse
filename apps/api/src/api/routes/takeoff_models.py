@@ -13,10 +13,11 @@ from vision.adapters.domain_pdf import DomainRenderError, render_reviewed_pdf
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
+    set_approval_status,
     set_review_status,
     set_scale,
 )
-from vision.domain.models import Coordinate, ReviewStatus
+from vision.domain.models import ApprovalStatus, Coordinate, ReviewStatus
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.repository import (
     ModelNotFoundError,
@@ -52,6 +53,12 @@ class WallEndpointUpdate(BaseModel):
     expected_revision: int = Field(ge=1)
     x: float
     y: float
+    actor: str = Field(default="user", min_length=1, max_length=128)
+
+
+class ApprovalUpdate(BaseModel):
+    expected_revision: int = Field(ge=1)
+    status: ApprovalStatus
     actor: str = Field(default="user", min_length=1, max_length=128)
 
 
@@ -147,6 +154,24 @@ def get_reviewed_pdf(
             "Content-Disposition": f'inline; filename="{model.id}-r{model.revision}.pdf"',
         },
     )
+
+
+@router.put("/{model_id}/approval")
+def update_approval_status(
+    model_id: str,
+    request: ApprovalUpdate,
+    repository: ModelRepository = Depends(get_model_repository),
+):
+    model = _get(repository, model_id)
+    _check_expected(model, request.expected_revision)
+    try:
+        updated = set_approval_status(
+            model, status=request.status, actor=request.actor,
+        )
+    except DomainCommandError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _save(repository, updated, request.expected_revision)
+    return {"model": to_json_dict(updated)}
 
 
 @router.put("/{model_id}/scale")

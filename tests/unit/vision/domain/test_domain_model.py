@@ -29,11 +29,18 @@ from vision.domain.import_cv import import_cv_result
 from vision.domain.commands import (
     DomainCommandError,
     move_wall_endpoint,
+    set_approval_status,
     set_review_status,
     set_scale,
 )
 from vision.domain.geometry import distance, point_at_offset, polygon_area
-from vision.domain.models import Coordinate, ObjectSourceKind, OpeningKind, ReviewStatus
+from vision.domain.models import (
+    ApprovalStatus,
+    Coordinate,
+    ObjectSourceKind,
+    OpeningKind,
+    ReviewStatus,
+)
 from vision.domain.repository import JsonFileModelRepository, RevisionConflictError
 from vision.domain.quantities import QuantityBasis, calculate_quantities
 from vision.domain.serialize import from_json_dict, to_json_dict
@@ -485,6 +492,58 @@ def test_reviewed_pdf_preserves_source_and_renders_current_model_revision():
     assert len(drawings) >= len(updated.walls) + len(updated.rooms)
     assert max(drawing["rect"].x1 for drawing in drawings) >= 240 * 72 / 200
     reviewed.close()
+
+
+def test_approval_requires_complete_verified_takeoff():
+    model = import_cv_result(cv_result(), source_fingerprint="abc123")
+
+    try:
+        set_approval_status(model, status=ApprovalStatus.APPROVED)
+    except DomainCommandError as exc:
+        assert "cannot be approved" in str(exc)
+    else:
+        raise AssertionError("unscaled automatic model was approved")
+    assert model.approval_status == ApprovalStatus.DRAFT
+    assert model.revision == 1
+
+
+def test_approved_model_is_frozen_until_explicitly_reopened():
+    model = set_scale(
+        import_cv_result(cv_result(), source_fingerprint="abc123"),
+        pixels_per_unit=20, unit="ft",
+    )
+    for collection in (
+        model.walls, model.openings, model.rooms, model.doors, model.windows,
+    ):
+        for item in collection:
+            item.metadata.review_status = ReviewStatus.CONFIRMED
+    model.validation_issues = validate_model(model)
+
+    approved = set_approval_status(
+        model, status=ApprovalStatus.APPROVED, actor="approver",
+    )
+
+    assert approved.approval_status == ApprovalStatus.APPROVED
+    assert approved.revision == model.revision + 1
+    assert approved.edit_history[-1].action == "set_approval_status"
+    assert calculate_quantities(
+        approved, QuantityBasis.VERIFIED,
+    ).authoritative is True
+    try:
+        set_scale(approved, pixels_per_unit=21, unit="ft")
+    except DomainCommandError as exc:
+        assert "reopened explicitly" in str(exc)
+    else:
+        raise AssertionError("approved model accepted a geometry-affecting edit")
+
+    reopened = set_approval_status(
+        approved, status=ApprovalStatus.IN_REVIEW, actor="approver",
+    )
+    edited = set_scale(reopened, pixels_per_unit=21, unit="ft")
+
+    assert reopened.approval_status == ApprovalStatus.IN_REVIEW
+    assert edited.scale.pixels_per_unit == 21
+    assert edited.revision == reopened.revision + 1
 
 
 def test_legacy_schema_remains_unchanged():

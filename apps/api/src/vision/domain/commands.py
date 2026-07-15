@@ -26,6 +26,7 @@ from .models import (
     TakeoffModel,
 )
 from .validation import validate_model
+from .quantities import QuantityBasis, calculate_quantities
 
 
 class DomainCommandError(ValueError):
@@ -329,6 +330,45 @@ def move_wall_endpoint(
             "before": {"x": old_point.x, "y": old_point.y},
             "after": {"x": point.x, "y": point.y},
         },
+    ))
+    updated.validation_issues = validate_model(updated)
+    return updated
+
+
+def set_approval_status(
+    model: TakeoffModel,
+    *,
+    status: ApprovalStatus,
+    actor: str = "user",
+) -> TakeoffModel:
+    """Freeze a verified revision or explicitly reopen it for further edits."""
+    if status == model.approval_status:
+        raise DomainCommandError(f"model is already {status.value}")
+    if (
+        model.approval_status == ApprovalStatus.APPROVED
+        and status != ApprovalStatus.IN_REVIEW
+    ):
+        raise DomainCommandError(
+            "approved models must be reopened to in_review before other transitions"
+        )
+
+    updated = copy.deepcopy(model)
+    before = updated.revision
+    if status == ApprovalStatus.APPROVED:
+        updated.validation_issues = validate_model(updated)
+        verified = calculate_quantities(updated, QuantityBasis.VERIFIED)
+        if not verified.complete:
+            reasons = "; ".join(verified.warnings) or "review is incomplete"
+            raise DomainCommandError(
+                f"model cannot be approved: {reasons}"
+            )
+
+    previous = updated.approval_status
+    updated.approval_status = status
+    updated.revision += 1
+    updated.edit_history.append(_event(
+        updated, "set_approval_status", actor, before, [updated.id],
+        {"before": previous.value, "after": status.value},
     ))
     updated.validation_issues = validate_model(updated)
     return updated
